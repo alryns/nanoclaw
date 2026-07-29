@@ -1,5 +1,8 @@
 # Dependencies
+# Both spellings: the trailing slash matches real directories, the bare name
+# also matches a node_modules symlink pointing at an install elsewhere.
 node_modules/
+node_modules
 .npm-cache/
 # pnpm content-addressable store (created when running in sandbox mode)
 .pnpm-store/

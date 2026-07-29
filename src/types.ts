@@ -26,6 +26,8 @@ export interface ContainerConfigRow {
   additional_mounts: string; // JSON: AdditionalMountConfig[]
   cli_scope: string; // 'disabled' | 'group' | 'global'
   timezone: string | null; // IANA id; NULL = follow the install-global timezone
+  delivery_mode: string | null; // NULL (= 'envelope') | 'envelope' | 'tools-only'
+  provider_settings?: string; // JSON: provider-specific runtime settings, keyed by agent provider
   /**
    * Session isolation tier ('container' | 'vm') — see SessionSpec.runtimeTier.
    * Optional on the TS type because the trunk schema does not carry the
@@ -34,6 +36,32 @@ export interface ContainerConfigRow {
    */
   runtime_tier?: string | null;
   updated_at: string;
+}
+
+/** Operator-owned OpenCode model-provider connection. No credentials are stored. */
+export interface OpenCodeModelProvider {
+  id: string;
+  name: string;
+  provider_id: string;
+  discovery_type: 'models-dev' | 'openai-compatible';
+  base_url: string | null;
+  models_url: string | null;
+  context_limit: number | null;
+  output_limit: number | null;
+  input_modalities: string;
+  delivery_mode: string | null;
+  instructions: string | null;
+  enabled: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DiscoveredOpenCodeModel {
+  id: string;
+  name: string;
+  contextLimit: number | null;
+  outputLimit: number | null;
+  inputModalities: string;
 }
 
 export type UnknownSenderPolicy = 'strict' | 'request_approval' | 'decline_notify' | 'public';

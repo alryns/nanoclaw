@@ -122,6 +122,62 @@ export function getRoutingBySeq(
   );
 }
 
+/**
+ * Highest seq currently in messages_out. Used by the poll-loop to snapshot a
+ * per-turn baseline: MCP tools (send_message, send_file, …) write outbound rows
+ * directly and never touch the in-process `sent` counter, so a turn that
+ * answered via a tool then ended with bare scratchpad looks identical to a
+ * silent drop. Comparing this against a turn-start baseline reveals whether the
+ * agent actually delivered anything out-of-band before the never-silent
+ * fallback fires. Reads outbound only — inbound activity never moves it.
+ */
+export function getMaxOutboundSeq(): number {
+  return getUndeliveredMessages().reduce((max, row) => Math.max(max, row.seq ?? 0), 0);
+}
+
+/**
+ * Highest seq ABOVE `sinceSeq` on a row that put new content in front of a
+ * person, or 0 when there is none.
+ *
+ * Narrower than getMaxOutboundSeq on purpose. Several outbound kinds move the
+ * seq without answering anyone: `system` rows are internal bookkeeping,
+ * `task_log` rows go to a run log, and an edit or a reaction rides on a `chat`
+ * row while only annotating a message that already exists. Counting any of
+ * those as an answer would let a turn that merely reacted pass as a reply,
+ * leaving whoever asked with nothing.
+ *
+ * One call answers both "did anything land?" and "what is the new baseline?".
+ * Reading those separately let a row committed by an out-of-process tool
+ * between the two reads be absorbed into the baseline without ever counting as
+ * a delivery. The scan is bounded by the caller's baseline; the cap only bites
+ * on a pathological run of annotations, where returning 0 errs toward chasing
+ * the turn rather than going quiet.
+ */
+const DELIVERY_SCAN_LIMIT = 200;
+
+export function getDeliveredSeqSince(sinceSeq: number): number {
+  const rows = getUndeliveredMessages()
+    .filter((row) => (row.kind === 'chat' || row.kind === 'chat-sdk') && (row.seq ?? 0) > sinceSeq)
+    .sort((a, b) => (b.seq ?? 0) - (a.seq ?? 0))
+    .slice(0, DELIVERY_SCAN_LIMIT);
+  for (const row of rows) {
+    if (row.seq !== null && isNewUserContent(row.content)) return row.seq;
+  }
+  return 0;
+}
+
+/** False for the operations that annotate an existing message. */
+function isNewUserContent(content: string): boolean {
+  try {
+    const parsed = JSON.parse(content) as { operation?: string };
+    return parsed.operation !== 'edit' && parsed.operation !== 'reaction';
+  } catch {
+    // A chat row we cannot parse is still a delivery the host will act on;
+    // counting it avoids following a real reply with a redundant notice.
+    return true;
+  }
+}
+
 export function getUndeliveredMessages(): MessageOutRow[] {
   return getAgentMailbox().operations.getUndeliveredMessages().map(messageRow);
 }

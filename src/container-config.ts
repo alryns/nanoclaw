@@ -18,6 +18,12 @@ import { isValidTimezone } from './timezone.js';
 import { log } from './log.js';
 import type { AgentGroup, ContainerConfigRow } from './types.js';
 
+export type DeliveryMode = 'envelope' | 'tools-only';
+
+function isDeliveryMode(value: unknown): value is DeliveryMode {
+  return value === 'envelope' || value === 'tools-only';
+}
+
 /**
  * Container-side path where a group's stamped plugins are mounted read-only.
  * Lockstep: create-agent.ts records `pluginRoot` under this prefix and
@@ -235,6 +241,15 @@ export interface AdditionalMountConfig {
   readonly?: boolean;
 }
 
+/**
+ * How the agent in a group reaches a destination.
+ *
+ * `envelope`: final-text `<message to="…">` blocks deliver, alongside the
+ * outbound tools. `tools-only`: only an explicit outbound tool call delivers
+ * and everything else the agent writes stays private. Absent means `envelope`.
+ */
+export type DeliveryMode = 'envelope' | 'tools-only';
+
 /** Shape of the materialized `container.json` file read by the container runner. */
 export interface ContainerConfig {
   mcpServers: Record<string, McpServerConfig>;
@@ -252,6 +267,8 @@ export interface ContainerConfig {
   /** API fast serving tier for this container; absent = the provider default. */
   fastMode?: boolean;
   timezone?: string;
+  deliveryMode?: DeliveryMode;
+  providerSettings?: Record<string, unknown>;
   /** Session isolation tier for the group's containers; absent = the composer's default ('container'). */
   runtimeTier?: 'container' | 'vm';
 }
@@ -377,7 +394,15 @@ export function configFromDb(row: ContainerConfigRow, group: AgentGroup): Contai
     fastMode: FAST_MODE || undefined,
     timezone: row.timezone && isValidTimezone(row.timezone) ? row.timezone : undefined,
     runtimeTier: parseRuntimeTier(row.runtime_tier, group.name),
+    // Anything the column doesn't recognize resolves to the default rather
+    // than reaching the runner: an unreadable mode must never widen delivery.
+    deliveryMode: isDeliveryMode(row.delivery_mode) ? row.delivery_mode : undefined,
+    providerSettings: JSON.parse(row.provider_settings ?? '{}') as Record<string, unknown>,
   };
+}
+
+function isDeliveryMode(value: string | null): value is DeliveryMode {
+  return value === 'envelope' || value === 'tools-only';
 }
 
 /**

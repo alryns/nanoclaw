@@ -453,6 +453,57 @@ describe('turn-end judgment', () => {
     expect(userTexts()).toEqual(['answered already']);
   });
 
+  it('does not credit a late unjudged send to the next question', async () => {
+    // Q1 and Q2 are both outstanding when the first send lands, so that result
+    // clears the queue. Q2's own send then lands with nobody formally waiting.
+    // Its seq must still advance the baseline; otherwise a later dry Q3 turn
+    // inherits Q2's send and incorrectly skips its correction.
+    const pushes: string[] = [];
+    async function* events(): AsyncGenerator<ProviderEvent> {
+      yield { type: 'init', continuation: 's1' };
+      insertChat('m2', 'second question');
+      let deadline = Date.now() + 5000;
+      while (!pushes.some((p) => p.includes('second question')) && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      writeMessageOut({
+        id: 'tool-1',
+        kind: 'chat',
+        platform_id: 'chan-1',
+        channel_type: 'discord',
+        content: JSON.stringify({ text: 'answer one' }),
+      });
+      yield { type: 'result', text: 'sent one' };
+      writeMessageOut({
+        id: 'tool-2',
+        kind: 'chat',
+        platform_id: 'chan-1',
+        channel_type: 'discord',
+        content: JSON.stringify({ text: 'answer two' }),
+      });
+      yield { type: 'result', text: 'sent two' };
+      insertChat('m3', 'image question');
+      deadline = Date.now() + 5000;
+      while (!pushes.some((p) => p.includes('image question')) && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      yield { type: 'result', text: 'private image description' };
+    }
+    const query: AgentQuery = {
+      push: (m: string) => {
+        pushes.push(m);
+      },
+      end: () => {},
+      events: events(),
+      abort: () => {},
+    };
+
+    await runToolsOnly(query);
+
+    expect(userTexts()).toEqual(['answer one', 'answer two']);
+    expect(pushes.filter((p) => p.includes('Nothing from your last turn'))).toHaveLength(1);
+  });
+
   it('reaches the placeholder within two judgments despite an interleaved push', async () => {
     // Steady message flow must not postpone the placeholder forever.
     const pushes: string[] = [];

@@ -588,14 +588,19 @@ export async function processQuery(
    * correction before anything is written on its behalf.
    */
   const judgeToolsOnlyResult = (text: string, inertBlocks: TaskMessageBlock[]): void => {
+    // Read even when nobody is currently waiting. A late second send can land
+    // after an earlier result cleared the whole queue; if its seq is left
+    // unjudged, the next person's dry turn can inherit that stale delivery and
+    // incorrectly skip its correction.
+    const deliveredSeq = getDeliveredSeqSince(lastJudgedSeq);
     const head = outstanding[0];
     if (!head) {
+      if (deliveredSeq > 0) lastJudgedSeq = deliveredSeq;
       archivePrompts.shift();
       return;
     }
     // Single read: the same value decides "did anything land?" and becomes the
     // next baseline, so a row committed between two reads cannot go uncounted.
-    const deliveredSeq = getDeliveredSeqSince(lastJudgedSeq);
     notifyExchangeComplete(onExchangeComplete, {
       prompt: archivePrompts[0] ?? initialPrompt,
       result: text,

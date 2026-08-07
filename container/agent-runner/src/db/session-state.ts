@@ -111,3 +111,43 @@ export function getCurrentInReplyTo(): string | null {
   if (!Number.isFinite(age) || age > IN_REPLY_TO_MAX_AGE_MS) return null;
   return row.value;
 }
+
+/**
+ * Where outbound seq stood when the current turn began. Published by the poll
+ * loop at batch start and again whenever follow-up messages are pushed into a
+ * live query, so "written during this turn" is answerable as `seq > baseline`.
+ *
+ * It is the turn boundary the in_reply_to stamp cannot provide: that stamp is
+ * set once per query and is not refreshed when a follow-up batch is pushed into
+ * an already-open one, so in a long-lived query it keeps naming the message
+ * that opened the query rather than the turn actually in progress.
+ *
+ * Same subprocess reasoning as the stamp above — the MCP server is a separate
+ * process and can only see this through the shared DB. Stored as a string
+ * because session_state values are text.
+ */
+const TURN_BASELINE_KEY = 'turn_outbound_baseline';
+
+export function setTurnOutboundBaseline(seq: number): void {
+  setValue(TURN_BASELINE_KEY, String(seq));
+}
+
+export function clearTurnOutboundBaseline(): void {
+  deleteValue(TURN_BASELINE_KEY);
+}
+
+/**
+ * Null when no turn is in progress, or when the published baseline is old
+ * enough to be a leftover: same staleness reasoning as the reply stamp, since
+ * a container killed mid-batch never runs the clear.
+ */
+export function getTurnOutboundBaseline(): number | null {
+  const row = getOutboundDb()
+    .prepare('SELECT value, updated_at FROM session_state WHERE key = ?')
+    .get(TURN_BASELINE_KEY) as { value: string; updated_at: string } | undefined;
+  if (!row) return null;
+  const age = Date.now() - new Date(row.updated_at).getTime();
+  if (!Number.isFinite(age) || age > IN_REPLY_TO_MAX_AGE_MS) return null;
+  const seq = Number(row.value);
+  return Number.isFinite(seq) ? seq : null;
+}

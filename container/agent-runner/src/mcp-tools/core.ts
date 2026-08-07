@@ -9,9 +9,10 @@
 import fs from 'fs';
 import path from 'path';
 
+import { loadConfig } from '../config.js';
 import { findByName, getAllDestinations } from '../destinations.js';
-import { getMessageIdBySeq, getRoutingBySeq, writeMessageOut } from '../db/messages-out.js';
-import { getCurrentInReplyTo } from '../db/session-state.js';
+import { findDuplicateChatSend, getMessageIdBySeq, getRoutingBySeq, writeMessageOut } from '../db/messages-out.js';
+import { getCurrentInReplyTo, getTurnOutboundBaseline } from '../db/session-state.js';
 import { getSessionRouting } from '../db/session-routing.js';
 import { registerTools } from './server.js';
 import type { McpToolDefinition } from './types.js';
@@ -92,10 +93,36 @@ export const sendMessage: McpToolDefinition = {
     const routing = resolveRouting(to);
     if ('error' in routing) return err(routing.error);
 
+    const inReplyTo = getCurrentInReplyTo();
+
+    // Some models re-issue a send that already succeeded, inside the same turn.
+    // In a tools-only group the tool call is the only thing that reaches anyone,
+    // so the repeat would put the same text in front of a person twice. Suppress
+    // the second write and say so plainly: the call is not an error — what it
+    // asked for has already happened — so answering with an error would only
+    // invite a retry. Without a published turn baseline there is nothing to
+    // scope "this turn" to, and envelope groups are left exactly as they were.
+    const turnBaseline = loadConfig().deliveryMode === 'tools-only' ? getTurnOutboundBaseline() : null;
+    if (turnBaseline !== null) {
+      const dupSeq = findDuplicateChatSend({
+        sinceSeq: turnBaseline,
+        platformId: routing.platform_id,
+        channelType: routing.channel_type,
+        threadId: routing.thread_id,
+        text,
+      });
+      if (dupSeq !== null) {
+        log(`send_message: duplicate of #${dupSeq} → ${routing.resolvedName}, not sent`);
+        return ok(
+          `Not sent: this exact text was already sent to ${routing.resolvedName} this turn (id: ${dupSeq}). Do not send it again. If you have more to say, send different text.`,
+        );
+      }
+    }
+
     const id = generateId();
     const seq = await writeMessageOut({
       id,
-      in_reply_to: getCurrentInReplyTo(),
+      in_reply_to: inReplyTo,
       kind: 'chat',
       platform_id: routing.platform_id,
       channel_type: routing.channel_type,

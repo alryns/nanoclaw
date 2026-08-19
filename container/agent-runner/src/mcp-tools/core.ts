@@ -11,7 +11,7 @@ import path from 'path';
 
 import { loadConfig } from '../config.js';
 import { findByName, getAllDestinations } from '../destinations.js';
-import { findDuplicateChatSend, getMessageIdBySeq, getRoutingBySeq, writeMessageOut } from '../db/messages-out.js';
+import { findChatSendSince, getMessageIdBySeq, getRoutingBySeq, writeMessageOut } from '../db/messages-out.js';
 import { getCurrentInReplyTo, getTurnOutboundBaseline } from '../db/session-state.js';
 import { getSessionRouting } from '../db/session-routing.js';
 import { registerTools } from './server.js';
@@ -71,7 +71,7 @@ function resolveRouting(
 export const sendMessage: McpToolDefinition = {
   tool: {
     name: 'send_message',
-    description: 'Send a message to a named destination.',
+    description: 'Send one user-facing response to a named destination. In tools-only mode, call at most once per destination per turn.',
     inputSchema: {
       type: 'object' as const,
       properties: {
@@ -95,26 +95,26 @@ export const sendMessage: McpToolDefinition = {
 
     const inReplyTo = getCurrentInReplyTo();
 
-    // Some models re-issue a send that already succeeded, inside the same turn.
-    // In a tools-only group the tool call is the only thing that reaches anyone,
-    // so the repeat would put the same text in front of a person twice. Suppress
-    // the second write and say so plainly: the call is not an error — what it
-    // asked for has already happened — so answering with an error would only
-    // invite a retry. Without a published turn baseline there is nothing to
-    // scope "this turn" to, and envelope groups are left exactly as they were.
+    // Small models can continue after a successful tool result and issue several
+    // paraphrases of the same answer. Exact-text dedupe cannot contain that loop
+    // and a "send different text" response actively teaches it to paraphrase.
+    // In tools-only mode, permit one plain send_message write per destination per
+    // turn. The poll loop republishes the baseline on a pushed follow-up, so the
+    // next user message receives a fresh budget. Other destinations and outbound
+    // tool kinds remain independent. With no baseline, and in envelope mode, the
+    // historical behavior is unchanged.
     const turnBaseline = loadConfig().deliveryMode === 'tools-only' ? getTurnOutboundBaseline() : null;
     if (turnBaseline !== null) {
-      const dupSeq = findDuplicateChatSend({
+      const priorSeq = findChatSendSince({
         sinceSeq: turnBaseline,
         platformId: routing.platform_id,
         channelType: routing.channel_type,
         threadId: routing.thread_id,
-        text,
       });
-      if (dupSeq !== null) {
-        log(`send_message: duplicate of #${dupSeq} → ${routing.resolvedName}, not sent`);
+      if (priorSeq !== null) {
+        log(`send_message: turn budget already used by #${priorSeq} → ${routing.resolvedName}, not sent`);
         return ok(
-          `Not sent: this exact text was already sent to ${routing.resolvedName} this turn (id: ${dupSeq}). Do not send it again. If you have more to say, send different text.`,
+          `Not sent: a user-facing message was already delivered to ${routing.resolvedName} this turn (id: ${priorSeq}). Stop this turn now. Do not retry, rephrase, or call send_message again until another user message arrives.`,
         );
       }
     }
@@ -131,7 +131,7 @@ export const sendMessage: McpToolDefinition = {
     });
 
     log(`send_message: #${seq} → ${routing.resolvedName}`);
-    return ok(`Message sent to ${routing.resolvedName} (id: ${seq})`);
+    return ok(`Message sent to ${routing.resolvedName} (id: ${seq}). The user-facing response is delivered. Stop this turn now; do not call send_message again for this destination until another user message arrives.`);
   },
 };
 

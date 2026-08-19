@@ -114,11 +114,11 @@ describe('send_message MCP tool — in_reply_to plumbing', () => {
 });
 
 /**
- * A tools-only group delivers nothing except what an outbound tool call writes,
- * so a model that re-issues a send it already completed puts the same text in
- * front of a person twice. The second identical send inside one turn is dropped
- * and answered with an explicit notice — not an error, which would only invite
- * a retry.
+ * A tools-only group delivers nothing except what an outbound tool call writes.
+ * Small models can continue after a successful send and retry with paraphrases,
+ * so exact-text dedupe is not a sufficient boundary. One plain send_message per
+ * destination per turn is allowed; later attempts are acknowledged without a
+ * write and told to stop rather than retry or rephrase.
  *
  * The turn boundary is the outbound baseline the poll loop publishes per turn,
  * not the in_reply_to stamp: that stamp is not refreshed when a follow-up batch
@@ -127,7 +127,7 @@ describe('send_message MCP tool — in_reply_to plumbing', () => {
  * published there is nothing to scope to, and envelope groups keep their
  * existing behaviour.
  */
-describe('send_message MCP tool — duplicate suppression', () => {
+describe('send_message MCP tool — tools-only turn budget', () => {
   const TEXT = 'the deploy finished, all four checks green';
 
   it('writes one row and refuses the repeat when the same text is sent twice in a turn', async () => {
@@ -142,8 +142,10 @@ describe('send_message MCP tool — duplicate suppression', () => {
     expect(JSON.parse(out[0].content).text).toBe(TEXT);
 
     expect(resultText(first)).toContain(`(id: ${out[0].seq})`);
+    expect(resultText(first)).toContain('Stop this turn now');
     expect(second.isError).toBeFalsy();
     expect(resultText(second)).toContain('Not sent');
+    expect(resultText(second)).toContain('Do not retry, rephrase');
     expect(resultText(second)).toContain(`(id: ${out[0].seq})`);
   });
 
@@ -158,15 +160,16 @@ describe('send_message MCP tool — duplicate suppression', () => {
     expect(resultText(second)).toContain('Not sent');
   });
 
-  it('lets a second, different message through', async () => {
+  it('refuses a paraphrased second message to the same destination', async () => {
     deliveryMode = 'tools-only';
     publishTurnBaseline(0);
 
     await sendMessage.handler({ to: 'peer', text: TEXT });
     const second = await sendMessage.handler({ to: 'peer', text: `${TEXT}, and the rollout is next` });
 
-    expect(getUndeliveredMessages()).toHaveLength(2);
-    expect(resultText(second)).toContain('Message sent');
+    expect(getUndeliveredMessages()).toHaveLength(1);
+    expect(resultText(second)).toContain('Not sent');
+    expect(resultText(second)).toContain('Stop this turn now');
   });
 
   it('lets the same text through to a different destination', async () => {

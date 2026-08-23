@@ -152,6 +152,11 @@ describe('composeSessionSpec', () => {
     expect(spec.containers[0].env.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
   });
 
+  it('carries provider-blocked hosts onto the agent container', () => {
+    const spec = compose({ contribution: { blockedHosts: ['api.anthropic.com'] } });
+    expect(spec.containers[0].blockedHosts).toEqual(['api.anthropic.com']);
+  });
+
   it('passes non-secret mailbox environment on the composed lane', () => {
     expect(compose().containers[0].env.NANOCLAW_MAILBOX_BACKEND).toBe('sqlite');
   });

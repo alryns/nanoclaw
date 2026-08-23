@@ -763,6 +763,7 @@ async function resolveProviderContribution(
     ? await fn({
         sessionDir: sessionDir(agentGroup.id, session.id),
         agentGroupId: agentGroup.id,
+        model: containerConfig.model,
         groupDir: path.resolve(GROUPS_DIR, agentGroup.folder),
         selectedSkills: selectedSkillNames(containerConfig),
         hostEnv: process.env,
@@ -1006,6 +1007,7 @@ export function composeSessionSpec(input: ComposeSessionSpecInput): SessionSpec 
     args: ['exec bun run /app/src/index.ts'],
     mounts: mergeMounts(toMountSpecs(mounts, agentGroup.id), gateway.mounts ?? []),
     contributedEnv,
+    blockedHosts: contribution.blockedHosts,
   };
 
   // The folder label (D9) rides the spec so an admission-side check can pin

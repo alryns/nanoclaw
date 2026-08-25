@@ -17,7 +17,7 @@ import path from 'path';
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 
 import { loadConfig, resetConfig } from './config.js';
-import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from './db/connection.js';
+import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from './mailbox/sqlite/connection.js';
 import { getDeliveredSeqSince, getUndeliveredMessages, writeMessageOut } from './db/messages-out.js';
 import { getPendingMessages } from './db/messages-in.js';
 import { buildCompactInstructions } from './compact-instructions.js';
@@ -332,8 +332,8 @@ describe('delivery accounting', () => {
     expect(getDeliveredSeqSince(0)).toBe(0);
   });
 
-  it('reads the window above a baseline, so one call answers both questions', () => {
-    const first = writeMessageOut({
+  it('reads the window above a baseline, so one call answers both questions', async () => {
+    const first = await writeMessageOut({
       id: 'd-1',
       kind: 'chat',
       platform_id: 'chan-1',
@@ -346,7 +346,7 @@ describe('delivery accounting', () => {
     expect(getDeliveredSeqSince(first)).toBe(0);
     expect(getDeliveredSeqSince(first - 1)).toBe(first);
 
-    const second = writeMessageOut({
+    const second = await writeMessageOut({
       id: 'd-2',
       kind: 'chat',
       platform_id: 'chan-1',
@@ -1015,8 +1015,8 @@ describe('envelope mode is the default and is unchanged', () => {
 // ── Dispatch-level behavior ──
 
 describe('dispatchResultText', () => {
-  it('reports tools-only envelopes as inert without an unwrapped-text warning', () => {
-    const result = dispatchResultText('<message to="discord-test">hi</message>', CHAT_ROUTING, 'tools-only');
+  it('reports tools-only envelopes as inert without an unwrapped-text warning', async () => {
+    const result = await dispatchResultText('<message to="discord-test">hi</message>', CHAT_ROUTING, 'tools-only');
 
     expect(result.sent).toBe(0);
     expect(result.hasUnwrapped).toBe(false);
@@ -1024,21 +1024,21 @@ describe('dispatchResultText', () => {
     expect(getUndeliveredMessages()).toHaveLength(0);
   });
 
-  it('flags an envelope addressed to a name that does not resolve', () => {
-    const result = dispatchResultText('<message to="nope">hi</message>', CHAT_ROUTING, 'tools-only');
+  it('flags an envelope addressed to a name that does not resolve', async () => {
+    const result = await dispatchResultText('<message to="nope">hi</message>', CHAT_ROUTING, 'tools-only');
 
     expect(result.taskBlocks[0].unknownDestination).toBe(true);
   });
 
-  it('never reports bare tools-only text as unwrapped', () => {
-    const result = dispatchResultText('just thinking out loud', CHAT_ROUTING, 'tools-only');
+  it('never reports bare tools-only text as unwrapped', async () => {
+    const result = await dispatchResultText('just thinking out loud', CHAT_ROUTING, 'tools-only');
 
     expect(result.hasUnwrapped).toBe(false);
     expect(getUndeliveredMessages()).toHaveLength(0);
   });
 
-  it('delivers the same envelope under the default mode', () => {
-    const result = dispatchResultText('<message to="discord-test">hi</message>', CHAT_ROUTING);
+  it('delivers the same envelope under the default mode', async () => {
+    const result = await dispatchResultText('<message to="discord-test">hi</message>', CHAT_ROUTING);
 
     expect(result.sent).toBe(1);
     expect(userTexts()).toEqual(['hi']);

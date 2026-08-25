@@ -36,13 +36,13 @@ export async function createContainerConfig(config: ContainerConfigRow): Promise
     `INSERT INTO container_configs (
         agent_group_id, provider, model, effort, image_tag, assistant_name,
         max_messages_per_prompt, skills, mcp_servers, packages_apt, packages_npm,
-        additional_mounts, cli_scope, timezone, updated_at
+        additional_mounts, cli_scope, delivery_mode, timezone, provider_settings, updated_at
       ) VALUES (
         @agent_group_id, @provider, @model, @effort, @image_tag, @assistant_name,
         @max_messages_per_prompt, @skills, @mcp_servers, @packages_apt, @packages_npm,
-        @additional_mounts, @cli_scope, @timezone, @updated_at
+        @additional_mounts, @cli_scope, @delivery_mode, @timezone, @provider_settings, @updated_at
       )`,
-    config,
+    { ...config, provider_settings: config.provider_settings ?? '{}' },
   );
 }
 

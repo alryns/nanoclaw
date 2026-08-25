@@ -142,11 +142,9 @@ export function clearTurnOutboundBaseline(): void {
  * a container killed mid-batch never runs the clear.
  */
 export function getTurnOutboundBaseline(): number | null {
-  const row = getOutboundDb()
-    .prepare('SELECT value, updated_at FROM session_state WHERE key = ?')
-    .get(TURN_BASELINE_KEY) as { value: string; updated_at: string } | undefined;
+  const row = getAgentMailbox().operations.getState(TURN_BASELINE_KEY);
   if (!row) return null;
-  const age = Date.now() - new Date(row.updated_at).getTime();
+  const age = Date.now() - new Date(row.updatedAt).getTime();
   if (!Number.isFinite(age) || age > IN_REPLY_TO_MAX_AGE_MS) return null;
   const seq = Number(row.value);
   return Number.isFinite(seq) ? seq : null;

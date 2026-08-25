@@ -18,12 +18,6 @@ import { isValidTimezone } from './timezone.js';
 import { log } from './log.js';
 import type { AgentGroup, ContainerConfigRow } from './types.js';
 
-export type DeliveryMode = 'envelope' | 'tools-only';
-
-function isDeliveryMode(value: unknown): value is DeliveryMode {
-  return value === 'envelope' || value === 'tools-only';
-}
-
 /**
  * Container-side path where a group's stamped plugins are mounted read-only.
  * Lockstep: create-agent.ts records `pluginRoot` under this prefix and
@@ -401,7 +395,7 @@ export function configFromDb(row: ContainerConfigRow, group: AgentGroup): Contai
   };
 }
 
-function isDeliveryMode(value: string | null): value is DeliveryMode {
+function isDeliveryMode(value: unknown): value is DeliveryMode {
   return value === 'envelope' || value === 'tools-only';
 }
 

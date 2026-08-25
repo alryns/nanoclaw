@@ -382,9 +382,11 @@ export async function processQuery(
    * results and decides the wrap-nudge. False → text events are
    * delivery-inert and the final result stays the single delivery door.
    */
-  emitsMidTurnText = false,
-  deliveryMode: DeliveryMode = 'envelope',
+  modeOrEmitsMidTurnText: DeliveryMode | boolean = 'envelope',
+  explicitDeliveryMode: DeliveryMode = 'envelope',
 ): Promise<QueryResult> {
+  const emitsMidTurnText = typeof modeOrEmitsMidTurnText === 'boolean' ? modeOrEmitsMidTurnText : false;
+  const deliveryMode = typeof modeOrEmitsMidTurnText === 'string' ? modeOrEmitsMidTurnText : explicitDeliveryMode;
   // Task runs already deliver through tools only, with the final text reserved
   // for the run log — they keep that path whatever the group's mode is, so the
   // turn-end validator below covers chat turns only.
@@ -599,7 +601,7 @@ export async function processQuery(
    * rather than emptying it, so the question behind it still gets its own
    * correction before anything is written on its behalf.
    */
-  const judgeToolsOnlyResult = (text: string, inertBlocks: TaskMessageBlock[]): void => {
+  const judgeToolsOnlyResult = async (text: string, inertBlocks: TaskMessageBlock[]): Promise<void> => {
     // Read even when nobody is currently waiting. A late second send can land
     // after an earlier result cleared the whole queue; if its seq is left
     // unjudged, the next person's dry turn can inherit that stale delivery and
@@ -641,7 +643,7 @@ export async function processQuery(
     }
     outstanding.shift();
     if (head.target) {
-      lastJudgedSeq = deliverToolsOnlyPlaceholder(head.target);
+      lastJudgedSeq = await deliverToolsOnlyPlaceholder(head.target);
     } else {
       // Documented residual: a model still dry after its agent-wake correction
       // ends in silence. The batch has no human endpoint to write to, so the
@@ -738,7 +740,7 @@ export async function processQuery(
             });
             archivePrompts.shift();
           } else if (toolsOnly) {
-            judgeToolsOnlyResult(event.text, taskBlocks);
+            await judgeToolsOnlyResult(event.text, taskBlocks);
           } else {
             // An unwrapped final text only warrants the wrap-nudge when NOTHING
             // was delivered this turn — hasUnwrapped already folds in the
@@ -747,12 +749,19 @@ export async function processQuery(
             // coaxes a redundant second message (live-observed). It stays in
             // the scratchpad log.
             const willRetryWrapping = hasUnwrapped && !unwrappedNudged;
+            const willFallbackDeliver =
+              hasUnwrapped && unwrappedNudged && !routing.taskRun && sent === 0 && !chatRowWrittenSince(turnStartSeq);
             notifyExchangeComplete(onExchangeComplete, {
               prompt: archivePrompts[0] ?? initialPrompt,
               result: event.text,
               continuation: queryContinuation ?? initialContinuation,
-              status: hasUnwrapped || willRetryTaskBlocks ? 'undelivered' : 'completed',
+              status: willFallbackDeliver
+                ? 'fallback'
+                : hasUnwrapped || willRetryTaskBlocks
+                  ? 'undelivered'
+                  : 'completed',
             });
+            if (willFallbackDeliver) await deliverFallbackResult(event.text, routing);
             if (willRetryWrapping) {
               unwrappedNudged = true;
               const destinations = getAllDestinations();
@@ -779,7 +788,7 @@ export async function processQuery(
         } else if (toolsOnly) {
           // A textless result is a success only if a tool ran — otherwise it is
           // the same dry turn as one that ended in scratchpad.
-          judgeToolsOnlyResult('', []);
+          await judgeToolsOnlyResult('', []);
         } else archivePrompts.shift();
         // Turn boundary: reset the per-turn sent count after the result's
         // nudge decision has used it. A nudge retry re-counts via its own
@@ -860,6 +869,26 @@ async function deliverErrorResult(text: string, routing: RoutingContext): Promis
     channel_type: routing.channelType,
     thread_id: routing.threadId,
     content: JSON.stringify({ text: stripHarnessTagArtifacts(text) }),
+  });
+}
+
+export const FALLBACK_PREFIX = '⚠ undelivered agent output (sent raw):';
+
+export async function deliverFallbackResult(text: string, routing: RoutingContext): Promise<void> {
+  const deliverable = stripInternalTags(text);
+  if (!deliverable) {
+    log('Never-silent fallback had no deliverable text after stripping <internal> — nothing sent');
+    return;
+  }
+  log('Agent stayed unwrapped after one correction — delivering marked raw fallback');
+  await writeMessageOut({
+    id: generateId(),
+    in_reply_to: routing.inReplyTo,
+    kind: 'chat',
+    platform_id: routing.platformId,
+    channel_type: routing.channelType,
+    thread_id: routing.threadId,
+    content: JSON.stringify({ text: `${FALLBACK_PREFIX}\n${deliverable}` }),
   });
 }
 
@@ -1125,9 +1154,10 @@ function wasWrittenInSeqWindow(dest: DestinationEntry, body: string, afterSeq: n
 export async function dispatchResultText(
   text: string,
   routing: RoutingContext,
-  options?: ResultDispatchOptions,
+  options?: ResultDispatchOptions | DeliveryMode,
 ): Promise<{ sent: number; hasUnwrapped: boolean; taskBlocks: TaskMessageBlock[]; resultBlocks: number }> {
-  const deliveryMode = options?.deliveryMode ?? 'envelope';
+  const dispatchOptions = typeof options === 'string' ? { deliveryMode: options } : options;
+  const deliveryMode = dispatchOptions?.deliveryMode ?? 'envelope';
   // <internal> spans are not-for-delivery scratchpad. Remove them BEFORE block
   // extraction so a <message> drafted inside one is never delivered from the
   // final text either — the mid-turn seam already guarantees this; without the
@@ -1141,7 +1171,7 @@ export async function dispatchResultText(
   // Blocks delivered mid-turn count toward this turn's sent total — a final
   // text with no (new) blocks after a mid-turn delivery is scratchpad, not an
   // undelivered reply.
-  let sent = options?.midTurnSent ?? 0;
+  let sent = dispatchOptions?.midTurnSent ?? 0;
   // <message> blocks present in THIS result text (delivered, stripped, task
   // or dropped alike) — drives the bare-error-text delivery gate, which must
   // key on the error result itself, not on earlier mid-turn deliveries.
@@ -1174,7 +1204,9 @@ export async function dispatchResultText(
       continue;
     }
     if (deliveryMode === 'tools-only') {
-      const unknownDestination = findByName(toName) === undefined;
+      // Correction text needs an exact configured-name check so it can tell
+      // the model which misspelled destination failed.
+      const unknownDestination = !getAllDestinations().some((destination) => destination.name === toName);
       log(
         `<message to="${toName}"> block not delivered — this group sends only via explicit tools` +
           (unknownDestination ? ' (and that destination does not exist)' : ''),
@@ -1208,8 +1240,8 @@ export async function dispatchResultText(
     // then it goes to the scratchpad as undelivered content, which makes the
     // turn count as undelivered and fires the wrap-nudge: the model re-sends
     // and the retry streams through the mid-turn door.
-    if (options?.suppressDelivery) {
-      if (options.turnDelivered) {
+    if (dispatchOptions?.suppressDelivery) {
+      if (dispatchOptions.turnDelivered) {
         log(`<message to="${toName}"> in final result after a same-turn delivery — repeat, result door does not send`);
       } else {
         log(
@@ -1237,7 +1269,7 @@ export async function dispatchResultText(
   // With suppressDelivery the delivered-this-turn question is answered by
   // turnDelivered (door deliveries + DB-visible sends like MCP send_message);
   // otherwise by this dispatch's own send count.
-  const anythingDelivered = options?.suppressDelivery ? options.turnDelivered === true : sent > 0;
+  const anythingDelivered = dispatchOptions?.suppressDelivery ? dispatchOptions.turnDelivered === true : sent > 0;
   const hasUnwrapped = !routing.taskRun && deliveryMode !== 'tools-only' && !anythingDelivered && !!scratchpad;
   if (hasUnwrapped) {
     log(`WARNING: agent output had no <message to="..."> blocks — nothing was sent`);
@@ -1335,7 +1367,11 @@ export const TOOLS_ONLY_ERROR_NOTICE = "Something went wrong on my side and I co
  * owed to a human endpoint and has not already delivered — an error arriving
  * after a successful tool send would otherwise double up on the reply.
  */
-export function handleToolsOnlyError(text: string, target: ReplyTarget | undefined, lastJudgedSeq: number): void {
+export async function handleToolsOnlyError(
+  text: string,
+  target: ReplyTarget | undefined,
+  lastJudgedSeq: number,
+): Promise<void> {
   log(`Tools-only error result (not forwarded): ${text.slice(0, 500)}`);
   if (!target) {
     log('Errored tools-only turn had no human endpoint — no notice sent');
@@ -1345,7 +1381,7 @@ export function handleToolsOnlyError(text: string, target: ReplyTarget | undefin
     log('Errored tools-only turn had already delivered — no notice sent');
     return;
   }
-  writeToReplyTarget(target, TOOLS_ONLY_ERROR_NOTICE);
+  await writeToReplyTarget(target, TOOLS_ONLY_ERROR_NOTICE);
 }
 
 /**
@@ -1356,7 +1392,7 @@ export function handleToolsOnlyError(text: string, target: ReplyTarget | undefin
 export const TOOLS_ONLY_PLACEHOLDER = "I couldn't put a reply together for that one. Try asking again.";
 
 /** Returns the seq written, so the caller can keep it out of the next judgment. */
-export function deliverToolsOnlyPlaceholder(target: ReplyTarget): number {
+export function deliverToolsOnlyPlaceholder(target: ReplyTarget): Promise<number> {
   log('Tools-only turn delivered nothing after a correction — sending the placeholder');
   return writeToReplyTarget(target, TOOLS_ONLY_PLACEHOLDER);
 }
@@ -1367,7 +1403,7 @@ export function deliverToolsOnlyPlaceholder(target: ReplyTarget): number {
  * batch that mixed a host notice with a user question would otherwise answer
  * into the agent channel.
  */
-function writeToReplyTarget(target: ReplyTarget, text: string): number {
+function writeToReplyTarget(target: ReplyTarget, text: string): Promise<number> {
   return writeMessageOut({
     id: generateId(),
     in_reply_to: target.inReplyTo,

@@ -13,14 +13,7 @@ const SCALAR_COLUMNS = new Set([
   'timezone',
   'delivery_mode',
 ]);
-const JSON_COLUMNS = new Set([
-  'skills',
-  'mcp_servers',
-  'packages_apt',
-  'packages_npm',
-  'additional_mounts',
-  'provider_settings',
-]);
+const JSON_COLUMNS = new Set(['skills', 'mcp_servers', 'packages_apt', 'packages_npm', 'additional_mounts']);
 
 export async function getContainerConfig(agentGroupId: string): Promise<ContainerConfigRow | undefined> {
   return getDb().get<ContainerConfigRow>('SELECT * FROM container_configs WHERE agent_group_id = ?', agentGroupId);
@@ -36,13 +29,13 @@ export async function createContainerConfig(config: ContainerConfigRow): Promise
     `INSERT INTO container_configs (
         agent_group_id, provider, model, effort, image_tag, assistant_name,
         max_messages_per_prompt, skills, mcp_servers, packages_apt, packages_npm,
-        additional_mounts, cli_scope, delivery_mode, timezone, provider_settings, updated_at
+        additional_mounts, cli_scope, delivery_mode, timezone, updated_at
       ) VALUES (
         @agent_group_id, @provider, @model, @effort, @image_tag, @assistant_name,
         @max_messages_per_prompt, @skills, @mcp_servers, @packages_apt, @packages_npm,
-        @additional_mounts, @cli_scope, @delivery_mode, @timezone, @provider_settings, @updated_at
+        @additional_mounts, @cli_scope, @delivery_mode, @timezone, @updated_at
       )`,
-    { ...config, provider_settings: config.provider_settings ?? '{}' },
+    config,
   );
 }
 
@@ -119,7 +112,7 @@ export async function updateContainerConfigScalars(
 /** Overwrite a JSON column wholesale. Used for skills, mcp_servers, packages_*, additional_mounts. */
 export async function updateContainerConfigJson(
   agentGroupId: string,
-  column: 'skills' | 'mcp_servers' | 'packages_apt' | 'packages_npm' | 'additional_mounts' | 'provider_settings',
+  column: 'skills' | 'mcp_servers' | 'packages_apt' | 'packages_npm' | 'additional_mounts',
   value: unknown,
 ): Promise<void> {
   if (!JSON_COLUMNS.has(column)) throw new Error(`Invalid JSON column: ${column}`);

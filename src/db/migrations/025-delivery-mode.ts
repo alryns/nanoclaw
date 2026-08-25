@@ -13,7 +13,7 @@ import type { Migration } from './index.js';
 export const migration025: Migration = {
   version: 25,
   name: 'delivery-mode',
-  up(db) {
-    db.exec(`ALTER TABLE container_configs ADD COLUMN delivery_mode TEXT;`);
+  async up(db) {
+    await db.exec(`ALTER TABLE container_configs ADD COLUMN delivery_mode TEXT;`);
   },
 };

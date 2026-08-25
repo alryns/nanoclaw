@@ -71,7 +71,8 @@ function resolveRouting(
 export const sendMessage: McpToolDefinition = {
   tool: {
     name: 'send_message',
-    description: 'Send one user-facing response to a named destination. In tools-only mode, call at most once per destination per turn.',
+    description:
+      'Send one user-facing response to a named destination. In tools-only mode, call at most once per destination per turn.',
     inputSchema: {
       type: 'object' as const,
       properties: {
@@ -131,7 +132,9 @@ export const sendMessage: McpToolDefinition = {
     });
 
     log(`send_message: #${seq} → ${routing.resolvedName}`);
-    return ok(`Message sent to ${routing.resolvedName} (id: ${seq}). The user-facing response is delivered. Stop this turn now; do not call send_message again for this destination until another user message arrives.`);
+    return ok(
+      `Message sent to ${routing.resolvedName} (id: ${seq}). The user-facing response is delivered. Stop this turn now; do not call send_message again for this destination until another user message arrives.`,
+    );
   },
 };
 

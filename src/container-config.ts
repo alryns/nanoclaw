@@ -262,7 +262,6 @@ export interface ContainerConfig {
   fastMode?: boolean;
   timezone?: string;
   deliveryMode?: DeliveryMode;
-  providerSettings?: Record<string, unknown>;
   /** Session isolation tier for the group's containers; absent = the composer's default ('container'). */
   runtimeTier?: 'container' | 'vm';
 }
@@ -391,7 +390,6 @@ export function configFromDb(row: ContainerConfigRow, group: AgentGroup): Contai
     // Anything the column doesn't recognize resolves to the default rather
     // than reaching the runner: an unreadable mode must never widen delivery.
     deliveryMode: isDeliveryMode(row.delivery_mode) ? row.delivery_mode : undefined,
-    providerSettings: JSON.parse(row.provider_settings ?? '{}') as Record<string, unknown>,
   };
 }
 

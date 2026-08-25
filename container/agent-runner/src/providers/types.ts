@@ -71,7 +71,12 @@ export interface ProviderExchange {
   result: string | null;
   /** Continuation/thread id in effect for the exchange, if any. */
   continuation?: string;
-  status: 'completed' | 'undelivered' | 'error';
+  /**
+   * Terminal result for this exchange. `fallback` means the agent stayed
+   * unwrapped after one correction, so its plain text was sent instead of
+   * dropping the reply.
+   */
+  status: 'completed' | 'undelivered' | 'fallback' | 'error';
 }
 
 /**

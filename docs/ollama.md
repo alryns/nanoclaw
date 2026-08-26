@@ -105,9 +105,17 @@ does not add model-specific prompt workarounds for those failures.
 These are not two copies of the same warm-up: the first removes model-load
 latency, while the second builds the real agent-prefix cache. The provider also
 disables Claude Code's changing attribution header
-(`CLAUDE_CODE_ATTRIBUTION_HEADER=0`) and keeps the runtime alias, system prompt,
-and session stable so Ollama's native prefix cache can be reused on later
-messages. No cache proxy is needed.
+(`CLAUDE_CODE_ATTRIBUTION_HEADER=0`) and its two recurring reminders
+(`CLAUDE_CODE_TOTAL_TOKENS_REMINDER=off`, `CLAUDE_CODE_TODO_REMINDER_MODE=off`),
+and keeps the runtime alias, system prompt, and session stable so Ollama's
+native prefix cache can be reused on later messages. No cache proxy is needed.
+
+Any system-role message Claude Code emits mid-conversation folds into the front
+of the prompt on the qwen3.8 renderer variant, which re-prefills the
+conversation behind it. Both reminders did that, so both are off. The todo knob
+also removes Claude Code's todo and task nudges, so Ollama groups run without
+them. Others in the same family (`date_change`, `critical_system_reminder`) are
+rare and have no knob; a date rollover still costs one re-prefill.
 
 ## Local web chat
 

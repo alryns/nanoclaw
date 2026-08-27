@@ -28,6 +28,13 @@ export function getProviderFactory(name: string): ProviderFactory {
   return factory;
 }
 
+/** Normalize and validate a provider selected from config before startup work begins. */
+export function requireProviderName(name: string): string {
+  const normalized = name.toLowerCase();
+  getProviderFactory(normalized);
+  return normalized;
+}
+
 export function listProviderNames(): string[] {
   return [...registry.keys()];
 }

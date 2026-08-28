@@ -9,6 +9,7 @@ import {
   attachCodexAutoApproval,
   buildCodexConfigPlan,
   buildCodexProcessEnv,
+  codexInferenceSection,
   renderCodexConfigToml,
   startOrResumeCodexThread,
   tomlBasicString,
@@ -89,6 +90,38 @@ describe('Codex config TOML', () => {
         '',
       ].join('\n'),
     );
+  });
+
+  // Core's speed property → Codex's service tier. `fast` is the only value
+  // with a Codex rendering; `standard` (the core default) and anything else
+  // emit no tier line, so Codex's own default serving tier stays in force.
+  it('renders service_tier = "fast" only for speed fast', () => {
+    const fast = renderCodexConfigToml({
+      ...buildCodexConfigPlan({}, {}),
+      inference: codexInferenceSection({ speed: 'fast' }),
+    });
+    expect(fast).toContain('service_tier = "fast"');
+    // The tier is a plain top-level key: no feature flag rides along with it.
+    expect(fast).not.toContain('fast_mode');
+
+    const standard = renderCodexConfigToml({
+      ...buildCodexConfigPlan({}, {}),
+      inference: codexInferenceSection({ speed: 'standard' }),
+    });
+    expect(standard).not.toContain('service_tier');
+
+    const unset = renderCodexConfigToml(buildCodexConfigPlan({}, {}));
+    expect(unset).not.toContain('service_tier');
+  });
+
+  it('treats speed as a fast-or-default flag — other tier names are dropped, not passed through', () => {
+    expect(codexInferenceSection({ speed: 'ultrafast' }).fastMode).toBeUndefined();
+    const rendered = renderCodexConfigToml({
+      ...buildCodexConfigPlan({}, {}),
+      inference: codexInferenceSection({ speed: 'ultrafast' }),
+    });
+    expect(rendered).not.toContain('service_tier');
+    expect(rendered).not.toContain('ultrafast');
   });
 
   it('escapes basic strings', () => {

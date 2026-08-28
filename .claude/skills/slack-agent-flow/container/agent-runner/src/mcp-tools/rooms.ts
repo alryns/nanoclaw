@@ -131,7 +131,7 @@ export const handoff: McpToolDefinition = {
   tool: {
     name: 'handoff',
     description:
-      'Post one Slack room message that reliably engages exactly the named sibling agent(s). Use one name for one responder or a list for several; never write raw <@...> mentions yourself. By default this targets the current Slack room/thread. From another session (for example immediately after create_room), pass the room destination name. Fire-and-forget: host-side validation rejects self, unknown agents, agents outside the room, duplicates, and embedded Slack mentions.',
+      'Post one visible message that reliably engages exactly the named sibling agent(s) on a shared Slack surface. Use this whenever the user asks room members to reply, speak, answer, or work there, even when they say "ask" rather than "handoff". Shared surfaces include channels, group DMs, and canvas-comment threads. Omit room to preserve the current thread; from a DM or another session, pass room only when the user wants the response in that named room. Use send_message instead for private/cross-surface A2A or an agent outside the shared surface. Never write raw <@...> mentions yourself. Fire-and-forget: host-side validation rejects self, unknown agents, agents outside the room, duplicates, and embedded Slack mentions.',
     inputSchema: {
       type: 'object' as const,
       properties: {
@@ -178,6 +178,14 @@ export const handoff: McpToolDefinition = {
 };
 
 registerTools([createRoom, addToRoom, handoff]);
+
+// Keep the channel-neutral send_message tool generic at its source, but make
+// the Slack construct's private-A2A versus shared-surface boundary visible at
+// tool-selection time. The barrel registers core.ts before this module.
+extendTool('send_message', {
+  descriptionSuffix:
+    'For agent-type destinations in a Slack construct, use direct A2A only for private or cross-surface coordination: ordinary requests from a DM, explicitly private work, or an agent outside the shared surface. When the user wants a member to reply, speak, answer, or work in a shared Slack channel, group DM, or canvas-comment thread, use handoff instead, even when they only say "ask". From a DM, use handoff with room only when the user names the shared room where the response should appear.',
+});
 
 // ── create_agent extension (Slack agent flow) ──
 //

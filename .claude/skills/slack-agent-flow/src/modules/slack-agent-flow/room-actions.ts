@@ -301,7 +301,10 @@ async function resolveHandoffRoom(
 
   if (!room) throw new RoomActionError('handoff needs a current Slack room or an explicit room destination');
   if (room.channel_type !== 'slack' || room.is_group !== 1) {
-    throw new RoomActionError(`handoff needs a shared Slack room ("${room.name ?? room.platform_id}" is not one)`);
+    throw new RoomActionError(
+      `handoff needs a shared Slack surface ("${room.name ?? room.platform_id}" is not one); ` +
+        'use send_message for private A2A, or pass an explicit room destination',
+    );
   }
   if (room.denied_at || room.detached_at) {
     throw new RoomActionError(`room "${room.name ?? room.platform_id}" is no longer active`);
@@ -357,7 +360,11 @@ export async function handleHandoff(content: Record<string, unknown>, session: S
           !mg.detached_at,
       );
       if (!targetRoom) {
-        throw new RoomActionError(`agent "${group.name}" is not wired to room "${room.name ?? room.platform_id}"`);
+        throw new RoomActionError(
+          `agent "${group.name}" is not wired to room "${room.name ?? room.platform_id}"; ` +
+            'use send_message for private A2A and relay the result, or add/invite the agent before handing off ' +
+            'if the user needs a visible reply there',
+        );
       }
       recipients.push(await participantForInstance(group, targetRoom.instance ?? 'slack', process.cwd()));
     }

@@ -272,11 +272,15 @@ bash setup/lib/restart.sh
   `create_room` naming all of them. When a batch of creates arrives together,
   their avatar generations are prefetched in parallel, so N waits collapse to
   roughly one.
-- **Room handoffs are explicit.** `handoff({ to, text, room? })` resolves one
-  agent name or an explicit list through the caller's destinations, verifies
-  every target is wired to the same physical Slack room, then posts through
-  the caller's room adapter/thread with exactly one real mention per selected
-  agent. Room creation never chooses a responder or wakes everyone by default.
+- **Shared-surface handoffs stay visible.** When the user asks room members to
+  reply, speak, answer, or work in a Slack channel, group DM, or canvas-comment
+  thread, `handoff({ to, text, room? })` resolves one name or an explicit list,
+  verifies every target is wired to the same physical surface, then posts
+  through the caller's adapter/thread with exactly one real mention per target.
+  Private DM, cross-surface, and outsider coordination stays on direct A2A via
+  `send_message`; it is never presented as a public room reply. From another
+  session, `room` is explicit. Room creation never chooses a responder or wakes
+  everyone by default.
 - **A2A cache staleness.** The a2a room allowlist is re-read from `.env` on a
   ≤30s cache. The room id is appended before any intro is posted, but the
   originating agent's own bridge may still miss ingesting the intro inside

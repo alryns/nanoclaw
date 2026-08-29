@@ -28,7 +28,6 @@ import {
   dispatchResultText,
   looksLikeToolMarkup,
   processQuery,
-  FALLBACK_PREFIX,
   TOOLS_ONLY_ERROR_NOTICE,
   TOOLS_ONLY_PLACEHOLDER,
 } from './poll-loop.js';
@@ -394,8 +393,8 @@ describe('turn-end judgment', () => {
     await runToolsOnly(query);
 
     const texts = userTexts();
-    expect(texts.some((t) => t.startsWith(FALLBACK_PREFIX))).toBe(false);
     expect(texts.some((t) => t.includes('rambling'))).toBe(false);
+    expect(texts).toEqual([TOOLS_ONLY_PLACEHOLDER]);
   });
 
   it('treats a textless result with no tool call as a dry judgment', async () => {
@@ -976,27 +975,28 @@ describe('envelope mode is the default and is unchanged', () => {
     expect(userTexts()).toEqual(['All set.']);
   });
 
-  it('still nudges an unwrapped turn and then falls back to raw text', async () => {
+  it('nudges an unwrapped turn once and then stays silent — no raw-text fallback', async () => {
+    // The never-silent guarantee belongs to tools-only mode. Envelope mode
+    // nudges once and leaves an unwrapped turn in the scratchpad, which is
+    // what every existing group is on and what main does.
     const { query, pushes } = makeQuery('forgot to wrap', 'forgot again');
 
     await processQuery(query, CHAT_ROUTING, ['m1'], 'mock', undefined, 'prompt', undefined);
 
     expect(pushes.filter((p) => p.includes('was not delivered'))).toHaveLength(1);
-    expect(userTexts()).toHaveLength(1);
-    expect(userTexts()[0]).toContain(FALLBACK_PREFIX);
-    expect(userTexts()[0]).toContain('forgot again');
+    expect(userTexts()).toEqual([]);
   });
 
-  it('ignores the reply-target machinery entirely — an agent wake still nudges and falls back', async () => {
+  it('ignores the reply-target machinery entirely — an agent wake nudges and sends nothing', async () => {
     const { query, pushes } = makeQuery('forgot to wrap', 'forgot again');
 
     await processQuery(query, AGENT_WAKE_ROUTING, ['m1'], 'mock', undefined, 'prompt', undefined);
 
     expect(pushes.filter((p) => p.includes('was not delivered'))).toHaveLength(1);
-    expect(userTexts()[0]).toContain(FALLBACK_PREFIX);
+    expect(userTexts()).toEqual([]);
   });
 
-  it('keeps addressing its fallback at the batch routing, not the reply target', async () => {
+  it('writes nothing outbound for a persistently unwrapped turn, whatever the reply targets say', async () => {
     const { query } = makeQuery('forgot to wrap', 'forgot again');
     const routing: RoutingContext = {
       ...CHAT_ROUTING,
@@ -1006,9 +1006,7 @@ describe('envelope mode is the default and is unchanged', () => {
 
     await processQuery(query, routing, ['m1'], 'mock', undefined, 'prompt', undefined);
 
-    const rows = getUndeliveredMessages().filter((m) => m.kind === 'chat');
-    expect(rows[0].channel_type).toBe('discord');
-    expect(rows[0].thread_id).toBe('batch-thread');
+    expect(getUndeliveredMessages().filter((m) => m.kind === 'chat')).toHaveLength(0);
   });
 });
 

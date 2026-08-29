@@ -703,7 +703,7 @@ export async function processQuery(
           });
           archivePrompts.shift();
         } else if (event.text) {
-          const { sent, hasUnwrapped, taskBlocks, resultBlocks } = await dispatchResultText(event.text, routing, {
+          const { hasUnwrapped, taskBlocks, resultBlocks } = await dispatchResultText(event.text, routing, {
             midTurnSent,
             // For emitsMidTurnText providers the result door NEVER delivers
             // content (error results excepted, below): mid-turn streaming is
@@ -749,19 +749,18 @@ export async function processQuery(
             // coaxes a redundant second message (live-observed). It stays in
             // the scratchpad log.
             const willRetryWrapping = hasUnwrapped && !unwrappedNudged;
-            const willFallbackDeliver =
-              hasUnwrapped && unwrappedNudged && !routing.taskRun && sent === 0 && !chatRowWrittenSince(turnStartSeq);
+            // Envelope mode has no never-silent fallback: an unwrapped turn is
+            // nudged once and then stays scratchpad, exactly as on main. The
+            // never-silent guarantee is a tools-only feature (correction, then
+            // TOOLS_ONLY_PLACEHOLDER); shipping stripped scratchpad to the user
+            // is the one thing envelope mode has always refused to do, and
+            // `bare text produces no outbound messages` asserts it.
             notifyExchangeComplete(onExchangeComplete, {
               prompt: archivePrompts[0] ?? initialPrompt,
               result: event.text,
               continuation: queryContinuation ?? initialContinuation,
-              status: willFallbackDeliver
-                ? 'fallback'
-                : hasUnwrapped || willRetryTaskBlocks
-                  ? 'undelivered'
-                  : 'completed',
+              status: hasUnwrapped || willRetryTaskBlocks ? 'undelivered' : 'completed',
             });
-            if (willFallbackDeliver) await deliverFallbackResult(event.text, routing);
             if (willRetryWrapping) {
               unwrappedNudged = true;
               const destinations = getAllDestinations();
@@ -869,26 +868,6 @@ async function deliverErrorResult(text: string, routing: RoutingContext): Promis
     channel_type: routing.channelType,
     thread_id: routing.threadId,
     content: JSON.stringify({ text: stripHarnessTagArtifacts(text) }),
-  });
-}
-
-export const FALLBACK_PREFIX = '⚠ undelivered agent output (sent raw):';
-
-export async function deliverFallbackResult(text: string, routing: RoutingContext): Promise<void> {
-  const deliverable = stripInternalTags(text);
-  if (!deliverable) {
-    log('Never-silent fallback had no deliverable text after stripping <internal> — nothing sent');
-    return;
-  }
-  log('Agent stayed unwrapped after one correction — delivering marked raw fallback');
-  await writeMessageOut({
-    id: generateId(),
-    in_reply_to: routing.inReplyTo,
-    kind: 'chat',
-    platform_id: routing.platformId,
-    channel_type: routing.channelType,
-    thread_id: routing.threadId,
-    content: JSON.stringify({ text: `${FALLBACK_PREFIX}\n${deliverable}` }),
   });
 }
 

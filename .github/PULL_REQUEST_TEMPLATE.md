@@ -6,7 +6,11 @@
 
      Plain English, short sentences, no filler. Write for a reviewer with 60
      seconds — technical terms fine, decoration not. If a sentence adds no
-     reviewable fact, delete it. -->
+     reviewable fact, delete it.
+
+     Keep Summary, Change kind, Validation, Security, and AI assistance in
+     every PR ("None." beats deletion); Related work, User and release
+     impact, and Skill delivery may go when they don't apply. -->
 
 ## Summary
 

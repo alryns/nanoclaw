@@ -185,14 +185,48 @@ Area labels (`area/*`) are applied automatically from the files your PR touches;
 
 **Changelog:** `CHANGELOG.md` is maintainer-owned — don't edit it in your PR. If your change is user-visible, put one user-facing line in the template's `release-note` block; it's optional raw material that maintainers harvest at release time. Skip it and a maintainer writes the line. For a breaking change, the release note must cover detect, why, fix/migration, and rollback.
 
-### PR description
+### PR body shape
 
-Keep it concise. Remove any template sections that don't apply. The description should cover:
+This applies to humans and coding agents alike:
 
-- **What** — what the PR adds or changes
-- **Why** — the motivation
-- **How it works** — brief explanation of the approach
-- **How it was tested** — what you did to verify it works
-- **Usage** — how the user invokes it (for skills)
+- First line of Summary = the purpose, one sentence. A reviewer reading only
+  it knows why the PR exists.
+- Then bold-led bullets, one fact per bullet (**Problem**: / **Fix**: /
+  **Out of scope**:). No prose walls; depth only some reviewers need goes in
+  a `<details>` appendix.
+- Plain English, short sentences, no filler. If a sentence adds no
+  reviewable fact, delete it.
+- Concise stays king, but five attestation sections are always present —
+  Summary, Change kind, Validation, Security and trust boundaries, AI
+  assistance — because silence is ambiguous: "None." beats deletion, and
+  reviewers rely on the fixed five landing in the same place every PR.
+- Three situational sections may be deleted when they don't apply: Related
+  work, User and release impact (only when there is no user-visible change),
+  Skill delivery (only when this is not a skill).
+- Validation lists receipts, one bullet per piece of evidence:
+  command -> result. Name the test that covers the changed behavior, or say
+  in one line why none does (docs-only, config-only, unreachable in CI).
 
-Don't pad the description. A few clear sentences are better than lengthy paragraphs.
+One pair, same facts, the shape is the difference.
+
+Hard to review:
+
+> The host sweep's ABSOLUTE_CEILING_MS was a hardcoded 30 minutes, so a slow
+> local-model backend that legitimately spends longer decoding one turn gets
+> cold-killed mid-turn, and this change makes the ceiling configurable by
+> resolving it per group from the new turn_ceiling_ms column added by
+> migration 024, falling back to the NANOCLAW_TURN_CEILING_MS env var and
+> then the built-in default, while invalid values fall through a level and
+> values below 60s are refused and a declared Bash timeout still extends
+> whatever ceiling wins.
+
+Easy to review:
+
+> **Problem**: `ABSOLUTE_CEILING_MS` is a hardcoded 30 minutes — slow
+> local-model turns get cold-killed mid-decode.
+>
+> **Fix**: ceiling resolved per group: (1) `turn_ceiling_ms` (migration 024),
+> (2) `NANOCLAW_TURN_CEILING_MS`, (3) the unchanged 30-minute default.
+>
+> **Guardrails**: invalid values fall through a level; sub-60s refused; a
+> declared Bash timeout still extends whatever ceiling wins.

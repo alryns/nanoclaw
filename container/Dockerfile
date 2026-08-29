@@ -65,9 +65,32 @@ ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 # ---- Bun runtime -------------------------------------------------------------
 # Install via the official script (handles multi-arch detection), then move
 # the binary to /usr/local/bin so the non-root `node` user can execute it.
-RUN curl -fsSL https://bun.sh/install | bash -s "bun-v${BUN_VERSION}" && \
-    install -m 0755 /root/.bun/bin/bun /usr/local/bin/bun && \
-    rm -rf /root/.bun
+#
+# Retried up to three times: the installer fetches a release asset over the
+# network, and a single transient failure there otherwise aborts the whole
+# image build. Each attempt starts from a clean slate so a half-written tree
+# from a failed download can never be the thing that gets installed, and
+# exhaustion still fails the build.
+RUN set -eu; \
+    attempt=1; \
+    while [ "$attempt" -le 3 ]; do \
+      rm -rf /root/.bun /tmp/bun-install.sh; \
+      if curl -fsSL --connect-timeout 10 --max-time 120 \
+           -o /tmp/bun-install.sh https://bun.sh/install && \
+         bash /tmp/bun-install.sh "bun-v${BUN_VERSION}"; then \
+        break; \
+      fi; \
+      if [ "$attempt" -eq 3 ]; then \
+        echo "Bun ${BUN_VERSION} install failed after 3 attempts" >&2; \
+        exit 1; \
+      fi; \
+      echo "Bun ${BUN_VERSION} install failed; retrying (attempt ${attempt})" >&2; \
+      sleep $((attempt * 2)); \
+      attempt=$((attempt + 1)); \
+    done; \
+    test -x /root/.bun/bin/bun; \
+    install -m 0755 /root/.bun/bin/bun /usr/local/bin/bun; \
+    rm -rf /root/.bun /tmp/bun-install.sh
 
 # ---- agent-runner deps -------------------------------------------------------
 # Deps are cached independently of CLI versions. Source is NOT baked in —

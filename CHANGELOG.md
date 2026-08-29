@@ -4,6 +4,8 @@ All notable changes to NanoClaw will be documented in this file.
 
 ## [Unreleased]
 
+- **The agent image build retries the Bun install.** The pinned Bun runtime is fetched from a release asset during `container/build.sh`; one transient network failure there aborted the whole image build. It is now attempted up to three times from a clean slate, with the same pinned version and the same result — and still fails the build if all three fail.
+
 - [BREAKING] **Agents now receive their capability instructions.** `CLAUDE.md` was a list of `@` imports into `/app`; Claude Code silently drops imports resolving outside the project directory, so eight of nine instruction sections never reached the model. It is now one flat file with every source inlined, shared with the Codex provider. Customized source breaks on two surfaces: `src/claude-md-compose.ts` is now `src/project-doc-compose.ts` with `composeGroupClaudeMd(group)` becoming `composeGroupProjectDoc(group, groupDir, spec)`, and the `/app/CLAUDE.md` and `/workspace/agent/.claude-fragments` mounts are gone. **Migration:** `grep -rn "claude-md-compose\|composeGroupClaudeMd\|claude-fragments" src/ setup/ scripts/` — no hits means nothing to do; otherwise repoint the import and pass `DEFAULT_PROJECT_DOC` as the third argument. Then clear the leftovers once: `rm -rf groups/*/.claude-fragments groups/*/.claude-shared.md` — they are inert (nothing reads them) but sit in the agent's working directory.
 
 ## [2.3.0] - 2026-08-24

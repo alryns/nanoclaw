@@ -32,7 +32,7 @@ Open issues through the issue forms. Each form asks only for what maintainers ne
 
 4. **Labels after you file.** The form stamps one `kind/*` label plus `triage/unresolved` (the capability form also adds `delivery/skill`); `triage/unresolved` means no maintainer has read the issue yet. A triager then applies exactly one `area/*` label; you never pick it. `priority/*` labels are maintainer-only, so there is no need to ask for one. `triage/needs-repro` means the issue is waiting on a minimal reproduction against a correctly configured deployment; posting one is the fastest way to move your issue.
 
-The full label reference and lifecycle live in the docs portal: [Issue triage](https://docs.nanoclaw.dev/concepts/triage).
+The labels are their own reference. Run `gh label list` to print the full set with descriptions, including the `area/*`, `priority/*`, and `triage/*` families a maintainer applies after you file.
 
 ## Source Code Changes
 

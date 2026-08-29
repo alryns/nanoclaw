@@ -155,15 +155,60 @@ export function getMaxOutboundSeq(): number {
  */
 const DELIVERY_SCAN_LIMIT = 200;
 
-export function getDeliveredSeqSince(sinceSeq: number): number {
+/** Where an outbound row went — the three fields that identify a correspondent. */
+export interface DeliveryDestination {
+  platformId: string | null;
+  channelType: string | null;
+  threadId: string | null;
+}
+
+/** One scan's answer: how far the baseline moves, and who was actually reached. */
+export interface DeliveriesSince {
+  /** Highest seq of a row that put new content in front of someone, or 0. */
+  maxSeq: number;
+  /** The destination of every such row, so an obligation can be matched by address. */
+  destinations: DeliveryDestination[];
+}
+
+/**
+ * Every delivery above `sinceSeq`, with its address.
+ *
+ * The addresses are the point: "a chat row appeared" is not the same question
+ * as "the person who asked got an answer". A tools-only agent that answers a
+ * peer agent — or destination B while B's neighbour A is the one waiting —
+ * writes a `kind: 'chat'` row just the same, and counting it would mark A's
+ * question satisfied while A hears nothing. Callers match a row's destination
+ * against the obligation they are discharging; `maxSeq` still advances the
+ * baseline past everything judged, so a delivery that discharged nobody cannot
+ * be re-counted for whoever asks next.
+ */
+export function getDeliveriesSince(sinceSeq: number): DeliveriesSince {
   const rows = getUndeliveredMessages()
     .filter((row) => (row.kind === 'chat' || row.kind === 'chat-sdk') && (row.seq ?? 0) > sinceSeq)
     .sort((a, b) => (b.seq ?? 0) - (a.seq ?? 0))
     .slice(0, DELIVERY_SCAN_LIMIT);
+  const destinations: DeliveryDestination[] = [];
+  let maxSeq = 0;
   for (const row of rows) {
-    if (row.seq !== null && isNewUserContent(row.content)) return row.seq;
+    if (row.seq === null || !isNewUserContent(row.content)) continue;
+    if (maxSeq === 0) maxSeq = row.seq;
+    destinations.push({
+      platformId: row.platform_id,
+      channelType: row.channel_type,
+      threadId: row.thread_id,
+    });
   }
-  return 0;
+  return { maxSeq, destinations };
+}
+
+/** True when an outbound row's address is the one an obligation is owed at. */
+export function sameDestination(a: DeliveryDestination, b: DeliveryDestination): boolean {
+  return a.platformId === b.platformId && a.channelType === b.channelType && a.threadId === b.threadId;
+}
+
+/** Address-blind form: did anything at all land above `sinceSeq`? */
+export function getDeliveredSeqSince(sinceSeq: number): number {
+  return getDeliveriesSince(sinceSeq).maxSeq;
 }
 
 /** False for the operations that annotate an existing message. */

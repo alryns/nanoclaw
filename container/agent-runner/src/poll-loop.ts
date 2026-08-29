@@ -7,7 +7,14 @@ import {
   markScriptSkipped,
   type MessageInRow,
 } from './db/messages-in.js';
-import { getDeliveredSeqSince, getMaxOutboundSeq, getUndeliveredMessages, writeMessageOut } from './db/messages-out.js';
+import {
+  getDeliveredSeqSince,
+  getDeliveriesSince,
+  getMaxOutboundSeq,
+  getUndeliveredMessages,
+  sameDestination,
+  writeMessageOut,
+} from './db/messages-out.js';
 import { clearStaleProcessingAcks } from './db/container-state.js';
 import { touchHeartbeat } from './heartbeat.js';
 import { getAgentMailbox } from './mailbox/index.js';
@@ -606,27 +613,42 @@ export async function processQuery(
     // after an earlier result cleared the whole queue; if its seq is left
     // unjudged, the next person's dry turn can inherit that stale delivery and
     // incorrectly skip its correction.
-    const deliveredSeq = getDeliveredSeqSince(lastJudgedSeq);
+    // One scan answers both "who was reached?" and "where does the baseline
+    // move to?", so a row committed between two reads cannot go uncounted.
+    const { maxSeq: deliveredSeq, destinations: deliveredTo } = getDeliveriesSince(lastJudgedSeq);
     const head = outstanding[0];
     if (!head) {
       if (deliveredSeq > 0) lastJudgedSeq = deliveredSeq;
       archivePrompts.shift();
       return;
     }
-    // Single read: the same value decides "did anything land?" and becomes the
-    // next baseline, so a row committed between two reads cannot go uncounted.
+    // An obligation is discharged by output addressed AT IT, not by any chat
+    // row at all. A send to a peer agent, or to a second destination in a
+    // multi-destination group, writes the same `kind: 'chat'` row as a reply —
+    // crediting it would mark the asker's question answered while the asker
+    // hears nothing. A targetless (agent-wake) entry has no address to match,
+    // so it keeps the address-blind reading: anything landing anywhere counts.
+    const isAnswered = (entry: OutstandingReply): boolean =>
+      entry.target ? deliveredTo.some((d) => sameDestination(d, entry.target!)) : deliveredSeq > 0;
+    const headAnswered = isAnswered(head);
     notifyExchangeComplete(onExchangeComplete, {
       prompt: archivePrompts[0] ?? initialPrompt,
       result: text,
       continuation: queryContinuation ?? initialContinuation,
-      status: deliveredSeq > 0 ? 'completed' : head.nudged ? 'fallback' : 'undelivered',
+      status: headAnswered ? 'completed' : head.nudged ? 'fallback' : 'undelivered',
     });
-    if (deliveredSeq > 0) {
-      lastJudgedSeq = deliveredSeq;
-      // Output landed in the conversation. Which queued question it answered is
-      // not knowable from here, and holding the rest back would post a
-      // placeholder over a reply the agent had already given.
-      outstanding.length = 0;
+    // The baseline advances past everything judged, answered or not: a send
+    // that discharged nobody must not be inherited by whoever asks next.
+    if (deliveredSeq > 0) lastJudgedSeq = deliveredSeq;
+    // Drop every correspondent this turn's output actually reached. Two
+    // questions from the same address are both closed by one reply — which of
+    // them it answered is not knowable from here, and holding the second back
+    // would post a placeholder over a reply already given. Correspondents the
+    // output never reached stay on the hook.
+    for (let i = outstanding.length - 1; i >= 0; i--) {
+      if (isAnswered(outstanding[i])) outstanding.splice(i, 1);
+    }
+    if (headAnswered) {
       archivePrompts.shift();
       return;
     }
@@ -1356,7 +1378,10 @@ export async function handleToolsOnlyError(
     log('Errored tools-only turn had no human endpoint — no notice sent');
     return;
   }
-  if (getDeliveredSeqSince(lastJudgedSeq) > 0) {
+  // "Already delivered" means delivered TO THIS TARGET. A send to a peer agent
+  // or to another destination is not a reply this person received, and skipping
+  // the notice on it would leave them with silence after a failed turn.
+  if (getDeliveriesSince(lastJudgedSeq).destinations.some((d) => sameDestination(d, target))) {
     log('Errored tools-only turn had already delivered — no notice sent');
     return;
   }

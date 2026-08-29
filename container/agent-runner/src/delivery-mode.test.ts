@@ -18,7 +18,12 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 
 import { loadConfig, resetConfig } from './config.js';
 import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from './mailbox/sqlite/connection.js';
-import { getDeliveredSeqSince, getUndeliveredMessages, writeMessageOut } from './db/messages-out.js';
+import {
+  getDeliveredSeqSince,
+  getDeliveriesSince,
+  getUndeliveredMessages,
+  writeMessageOut,
+} from './db/messages-out.js';
 import { getPendingMessages } from './db/messages-in.js';
 import { buildCompactInstructions } from './compact-instructions.js';
 import { buildSystemPromptAddendum } from './destinations.js';
@@ -373,6 +378,28 @@ describe('delivery accounting', () => {
 
     expect(getDeliveredSeqSince(base)).toBe(0);
   });
+
+  it('reports the address of every delivery, not just that one happened', async () => {
+    await writeMessageOut({
+      id: 'to-human',
+      kind: 'chat',
+      platform_id: 'chan-1',
+      channel_type: 'discord',
+      content: JSON.stringify({ text: 'for the human' }),
+    });
+    await writeMessageOut({
+      id: 'to-peer',
+      kind: 'chat',
+      platform_id: 'peer-group',
+      channel_type: 'agent',
+      content: JSON.stringify({ text: 'for the peer' }),
+    });
+
+    const { destinations } = getDeliveriesSince(0);
+
+    expect(destinations).toContainEqual({ platformId: 'chan-1', channelType: 'discord', threadId: null });
+    expect(destinations).toContainEqual({ platformId: 'peer-group', channelType: 'agent', threadId: null });
+  });
 });
 
 // ── The judgment cycle ──
@@ -385,6 +412,83 @@ describe('turn-end judgment', () => {
 
     expect(pushes).toHaveLength(1);
     expect(userTexts()).toEqual([TOOLS_ONLY_PLACEHOLDER]);
+  });
+
+  it('does not let a send_message to a peer agent discharge a human\u2019s question', async () => {
+    // The human asked. The agent answers a PEER instead — an agent-channel row
+    // is `kind: 'chat'` like any other, so an address-blind accounting would
+    // call the question answered and leave the human with silence.
+    const pushes: string[] = [];
+    async function* events(): AsyncGenerator<ProviderEvent> {
+      yield { type: 'init', continuation: 's1' };
+      await writeMessageOut({
+        id: 'peer-1',
+        kind: 'chat',
+        platform_id: 'peer-group',
+        channel_type: 'agent',
+        content: JSON.stringify({ text: 'hey peer, any idea?' }),
+      });
+      yield { type: 'result', text: 'asked the other agent' };
+      yield { type: 'result', text: 'still waiting on them' };
+    }
+    const query: AgentQuery = {
+      push: (m: string) => {
+        pushes.push(m);
+      },
+      end: () => {},
+      events: events(),
+      abort: () => {},
+    };
+
+    await runToolsOnly(query);
+
+    // The human's obligation survived the peer send: corrected once, then answered.
+    expect(pushes.filter((p) => p.includes('Nothing from your last turn'))).toHaveLength(1);
+    const toHuman = getUndeliveredMessages().filter((m) => m.channel_type === 'discord');
+    expect(toHuman.map((m) => JSON.parse(m.content).text)).toEqual([TOOLS_ONLY_PLACEHOLDER]);
+  });
+
+  it('does not let a send to one destination discharge another destination\u2019s question', async () => {
+    const routing: RoutingContext = {
+      ...CHAT_ROUTING,
+      replyTargets: [
+        { platformId: 'chan-1', channelType: 'discord', threadId: null, inReplyTo: 'm1' },
+        { platformId: 'chan-2', channelType: 'slack', threadId: null, inReplyTo: 'm2' },
+      ],
+    };
+    const pushes: string[] = [];
+    async function* events(): AsyncGenerator<ProviderEvent> {
+      yield { type: 'init', continuation: 's1' };
+      await writeMessageOut({
+        id: 'slack-1',
+        kind: 'chat',
+        platform_id: 'chan-2',
+        channel_type: 'slack',
+        content: JSON.stringify({ text: 'answered slack' }),
+      });
+      yield { type: 'result', text: 'told slack' };
+      yield { type: 'result', text: 'nothing more' };
+    }
+    const query: AgentQuery = {
+      push: (m: string) => {
+        pushes.push(m);
+      },
+      end: () => {},
+      events: events(),
+      abort: () => {},
+    };
+
+    await runToolsOnly(query, routing);
+
+    // Discord was never reached: it keeps its correction and its placeholder.
+    // Slack was answered and is not chased with a second message.
+    const byChannel = (ch: string) =>
+      getUndeliveredMessages()
+        .filter((m) => m.channel_type === ch)
+        .map((m) => JSON.parse(m.content).text as string);
+    expect(pushes.filter((p) => p.includes('Nothing from your last turn'))).toHaveLength(1);
+    expect(byChannel('discord')).toEqual([TOOLS_ONLY_PLACEHOLDER]);
+    expect(byChannel('slack')).toEqual(['answered slack']);
   });
 
   it('never falls back to raw agent text', async () => {

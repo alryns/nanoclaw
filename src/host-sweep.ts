@@ -12,7 +12,9 @@
  *   tries++. Existing retry machinery does the rest.
  *
  *   If the container IS running:
- *     1. Absolute ceiling: heartbeat age > max(30 min, current_bash_timeout)
+ *     1. Absolute ceiling: heartbeat age > max(turn ceiling, current_bash_timeout)
+ *        where the turn ceiling is 30 min unless overridden per group or via
+ *        NANOCLAW_TURN_CEILING_MS
  *        → kill. Covers the "alive but silent for 30 min" case. Extended
  *        only while Bash is declared as running longer, honouring the
  *        user's own timeout directive. Kill then resets processing rows.
@@ -31,8 +33,11 @@
 import fs from 'fs';
 
 import { ensureEgressNetwork } from './egress-lockdown.js';
+import { TURN_CEILING_MS_RAW } from './config.js';
+import { DEFAULT_TURN_CEILING_MS, resolveTurnCeilingMs } from './turn-ceiling.js';
 import { getActiveSessions, isTaskThread, updateSession } from './db/sessions.js';
 import { getAgentGroup } from './db/agent-groups.js';
+import { getContainerConfig } from './db/container-configs.js';
 import { log } from './log.js';
 import { heartbeatPath, withExistingMailboxSession } from './session-manager.js';
 import { getContainerStartedAtMs, isContainerRunning, killContainer, wakeContainer } from './container-runner.js';
@@ -42,8 +47,17 @@ import type { ContainerState, InboundMailbox, OutboundMailbox } from './mailbox/
 const SWEEP_INTERVAL_MS = 60_000;
 // Absolute idle ceiling for a running container. If the heartbeat file hasn't
 // been touched in this long, the container is either stuck or doing genuinely
-// nothing — kill and restart on the next inbound.
-export const ABSOLUTE_CEILING_MS = 30 * 60 * 1000;
+// nothing — kill and restart on the next inbound. This is the built-in
+// default; the effective ceiling is resolved per group (group override →
+// NANOCLAW_TURN_CEILING_MS env → this constant) because a slow local-model
+// backend can legitimately go longer than 30 min between stream events while
+// actively decoding (#3643).
+export const ABSOLUTE_CEILING_MS = DEFAULT_TURN_CEILING_MS;
+
+async function groupTurnCeilingMs(agentGroupId: string): Promise<number> {
+  const row = await getContainerConfig(agentGroupId);
+  return resolveTurnCeilingMs(row?.turn_ceiling_ms, TURN_CEILING_MS_RAW);
+}
 // Stuck tolerance window applied per 'processing' claim — "did we see any
 // signs of life since this message was claimed?"
 export const CLAIM_STUCK_MS = 60 * 1000;
@@ -66,6 +80,7 @@ export function decideStuckAction(args: {
   containerStartedAtMs?: number; // fallback when heartbeat file absent
   containerState: ContainerState | null;
   claims: Array<{ messageId: string; statusChanged: string }>;
+  ceilingMs?: number; // resolved turn ceiling; absent = built-in default
 }): StuckDecision {
   const { now, heartbeatMtimeMs, containerStartedAtMs, containerState, claims } = args;
   const declaredBashMs = bashTimeoutMs(containerState);
@@ -89,7 +104,7 @@ export function decideStuckAction(args: {
   const effectiveHeartbeatMs = heartbeatMtimeMs !== 0 ? heartbeatMtimeMs : (containerStartedAtMs ?? 0);
   if (effectiveHeartbeatMs !== 0) {
     const heartbeatAge = now - effectiveHeartbeatMs;
-    const ceiling = Math.max(ABSOLUTE_CEILING_MS, declaredBashMs ?? 0);
+    const ceiling = Math.max(args.ceilingMs ?? ABSOLUTE_CEILING_MS, declaredBashMs ?? 0);
     if (heartbeatAge > ceiling) {
       return { action: 'kill-ceiling', heartbeatAgeMs: heartbeatAge, ceilingMs: ceiling };
     }
@@ -212,7 +227,7 @@ async function maintainSessionMailbox(
 ): Promise<void> {
   const alive = isContainerRunning(session.id);
   if (alive && !justWoke) {
-    enforceRunningContainerSla(mailbox, mailbox, session, agentGroupId);
+    enforceRunningContainerSla(mailbox, mailbox, session, agentGroupId, await groupTurnCeilingMs(agentGroupId));
   }
   if (!alive) {
     resetStuckProcessingRows(mailbox, mailbox, session, 'container not running');
@@ -261,6 +276,7 @@ function enforceRunningContainerSla(
   outDb: OutboundMailbox,
   session: Session,
   agentGroupId: string,
+  turnCeilingMs: number,
 ): void {
   const decision = decideStuckAction({
     now: Date.now(),
@@ -268,6 +284,7 @@ function enforceRunningContainerSla(
     containerStartedAtMs: getContainerStartedAtMs(session.id),
     containerState: outDb.getContainerState(),
     claims: outDb.getProcessingClaims(),
+    ceilingMs: turnCeilingMs,
   });
 
   if (decision.action === 'ok') return;

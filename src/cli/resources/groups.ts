@@ -29,6 +29,7 @@ import {
   type RestampResult,
 } from '../../templates/restamp.js';
 import { isValidTimezone } from '../../timezone.js';
+import { MIN_TURN_CEILING_MS, parseTurnCeilingMs } from '../../turn-ceiling.js';
 import type { AgentGroup, ContainerConfigRow } from '../../types.js';
 import { registerResource } from '../crud.js';
 import { localizeIsoTimestamps } from '../format.js';
@@ -51,6 +52,25 @@ function parseTimezoneFlag(value: unknown): string | null | undefined {
   return tz;
 }
 
+/**
+ * Parse a --turn-ceiling-ms flag: undefined = not passed, null = explicit
+ * clear (empty string → follow the install default), otherwise a validated
+ * integer >= MIN_TURN_CEILING_MS. Same invalid-value contract as
+ * parseTimezoneFlag: throw here, in the handler.
+ */
+function parseTurnCeilingFlag(value: unknown): number | null | undefined {
+  if (value === undefined) return undefined;
+  const raw = String(value);
+  if (raw === '') return null;
+  const parsed = parseTurnCeilingMs(raw);
+  if (parsed === undefined) {
+    throw new Error(
+      `invalid --turn-ceiling-ms: "${raw}" must be an integer number of milliseconds >= ${MIN_TURN_CEILING_MS} (e.g. 3600000 for 1 hour); pass "" to follow the install default`,
+    );
+  }
+  return parsed;
+}
+
 /** Deserialize JSON columns for display. */
 function presentConfig(row: ContainerConfigRow): Record<string, unknown> {
   return {
@@ -68,6 +88,7 @@ function presentConfig(row: ContainerConfigRow): Record<string, unknown> {
     additional_mounts: JSON.parse(row.additional_mounts),
     cli_scope: row.cli_scope,
     timezone: row.timezone,
+    turn_ceiling_ms: row.turn_ceiling_ms,
     updated_at: row.updated_at,
   };
 }
@@ -371,7 +392,8 @@ registerResource({
       description:
         'Update container config scalar fields. Changes are saved but do NOT take effect until you run `ncl groups restart`. ' +
         'Use --id <group-id> and any of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, ' +
-        '--timezone (IANA id like "Europe/Lisbon"; "" clears back to the install default; scheduled-task times follow it immediately, message display after restart).',
+        '--timezone (IANA id like "Europe/Lisbon"; "" clears back to the install default; scheduled-task times follow it immediately, message display after restart), ' +
+        '--turn-ceiling-ms (host-sweep absolute turn ceiling in ms, integer >= 60000; "" clears back to the install default — NANOCLAW_TURN_CEILING_MS or 30 min; takes effect on the next sweep tick, no restart needed).',
       handler: async (args) => {
         const id = args.id as string;
         if (!id) throw new Error('--id is required');
@@ -389,11 +411,14 @@ registerResource({
             | 'max_messages_per_prompt'
             | 'cli_scope'
             | 'timezone'
+            | 'turn_ceiling_ms'
           >
         > = {};
         if (args.provider !== undefined) updates.provider = args.provider as string;
         const timezone = parseTimezoneFlag(args.timezone);
         if (timezone !== undefined) updates.timezone = timezone;
+        const turnCeiling = parseTurnCeilingFlag(args.turn_ceiling_ms);
+        if (turnCeiling !== undefined) updates.turn_ceiling_ms = turnCeiling;
         if (args.model !== undefined) updates.model = args.model as string;
         if (args.effort !== undefined) updates.effort = args.effort as string;
         if (args.image_tag !== undefined) updates.image_tag = args.image_tag as string;
@@ -410,7 +435,7 @@ registerResource({
 
         if (Object.keys(updates).length === 0) {
           throw new Error(
-            'Nothing to update — provide at least one of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, --timezone',
+            'Nothing to update — provide at least one of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, --timezone, --turn-ceiling-ms',
           );
         }
 

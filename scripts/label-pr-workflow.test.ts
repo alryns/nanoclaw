@@ -24,7 +24,21 @@ type ComputeLabels = (args: {
   currentLabels?: string[];
 }) => LabelDecision;
 
-function extractComputeLabels(): ComputeLabels {
+type DecideCompliance = (args: {
+  body?: string | null;
+  add: string[];
+  currentLabels?: string[];
+}) => { state: 'success' | 'failure' | null };
+
+type ShouldPostComplianceComment = (state: string | null, existingCommentBodies: Array<string | null>) => boolean;
+
+interface ExtractedLogic {
+  computeLabels: ComputeLabels;
+  decideCompliance: DecideCompliance;
+  shouldPostComplianceComment: ShouldPostComplianceComment;
+}
+
+function extractLogic(): ExtractedLogic {
   const workflow = fs.readFileSync(
     path.join(__dirname, '..', '.github', 'workflows', 'label-pr.yml'),
     'utf8',
@@ -41,10 +55,18 @@ function extractComputeLabels(): ComputeLabels {
     .slice(1) // drop the START marker line itself
     .map((line) => line.replace(/^ {12}/, ''))
     .join('\n');
-  return new Function(`${code}\nreturn computeLabels;`)() as ComputeLabels;
+  return new Function(
+    `${code}\nreturn { computeLabels, decideCompliance, shouldPostComplianceComment };`,
+  )() as ExtractedLogic;
 }
 
-const computeLabels = extractComputeLabels();
+const { computeLabels, decideCompliance, shouldPostComplianceComment } = extractLogic();
+
+/** Full pipeline as the driver runs it: parse, then judge compliance. */
+function complianceFor(body: string, title: string, currentLabels: string[] = []) {
+  const { add } = computeLabels({ body, title, author: 'drive-by-contributor', currentLabels });
+  return decideCompliance({ body, add, currentLabels });
+}
 
 const V2 = '<!-- nanoclaw-pr-template:v2 -->\n';
 // Blank template: no kind box, neither skill box. `skill: true` checks the
@@ -290,6 +312,37 @@ describe('v1 bodies (frozen pre-v2 behavior)', () => {
     const res = computeLabels({ body: null, title: null, author: FORK_AUTHOR });
     expect(res.add).toEqual([]);
     expect(res.remove).toEqual([]);
+  });
+});
+
+describe('template-compliance (report-only)', () => {
+  it('v2 body with zero kind verdict: failing status', () => {
+    expect(complianceFor(v2Body([]), 'Update stuff').state).toBe('failure');
+  });
+
+  it('good bodies are green: checkbox verdict, title fallback, or an already-applied kind', () => {
+    expect(complianceFor(v2Body(['kind/bug']), 'x').state).toBe('success');
+    expect(complianceFor(v2Body([]), 'fix: something').state).toBe('success');
+    // Maintainer classified at triage; blank body must NOT go red.
+    expect(complianceFor(v2Body([]), 'Update stuff', ['kind/cleanup']).state).toBe('success');
+  });
+
+  it('v1 and no-marker bodies are untouched: no status at all', () => {
+    expect(complianceFor('<!-- contributing-guide: v1 -->\n- [x] **Fix** - bug fix', 'x').state).toBeNull();
+    expect(complianceFor('just a hand-written body', 'fix: x').state).toBeNull();
+  });
+
+  it('the fix comment posts once, ever — idempotent across pushes', () => {
+    // First failing push: no comments yet -> post.
+    expect(shouldPostComplianceComment('failure', [])).toBe(true);
+    // Later pushes: our marker comment exists -> never repeat.
+    const marked = ['<!-- nanoclaw-template-compliance -->\nThis PR uses the v2 template…'];
+    expect(shouldPostComplianceComment('failure', marked)).toBe(false);
+    // Unrelated comments do not suppress it.
+    expect(shouldPostComplianceComment('failure', ['LGTM', null])).toBe(true);
+    // Green states never comment.
+    expect(shouldPostComplianceComment('success', [])).toBe(false);
+    expect(shouldPostComplianceComment(null, [])).toBe(false);
   });
 });
 

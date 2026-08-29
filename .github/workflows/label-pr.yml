@@ -12,14 +12,19 @@ name: Label PR
 # shipped code cannot drift. Edit the function only between the markers.
 on:
   pull_request_target:
-    types: [opened, edited, reopened, ready_for_review]
+    # `synchronize` is for the template-compliance status only (a commit
+    # status is per-SHA, so every push needs a fresh one). Label mutations
+    # stay gated off synchronize in the driver below, preserving the
+    # labels-only-on-body-events behavior.
+    types: [opened, edited, reopened, ready_for_review, synchronize]
 
 jobs:
   label:
     runs-on: ubuntu-latest
     permissions:
       pull-requests: write
-      issues: write # createLabel — auto-provisions the core-team label (v1-era behavior, kept until Decision 4)
+      issues: write # createLabel (core-team, until Decision 4) + list/create the single compliance comment
+      statuses: write # report-only template-compliance commit status
     steps:
       - uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
         with:
@@ -177,15 +182,90 @@ jobs:
 
               return { add, remove, coreTeam };
             }
+
+            // Report-only template compliance (CI-04: the classification
+            // check runs and reports long before it is ever required).
+            //   - v2-marker body with a kind classification (parser verdict,
+            //     title fallback, or an already-applied managed kind) →
+            //     'success'.
+            //   - v2-marker body with no classification at all → 'failure':
+            //     a red X on the commit status, deliberately NOT in the
+            //     required-checks list, so the PR stays mergeable and nothing
+            //     is ever auto-closed.
+            //   - v1 / no-marker bodies → null: untouched, no status at all.
+            function decideCompliance({ body, add, currentLabels }) {
+              if (!(body || '').includes('<!-- nanoclaw-pr-template:v2 -->')) return { state: null };
+              const MANAGED_KINDS = ['kind/bug', 'kind/feature', 'kind/documentation', 'kind/cleanup', 'kind/hardening'];
+              const classified =
+                add.some((l) => MANAGED_KINDS.includes(l)) ||
+                (currentLabels || []).some((l) => MANAGED_KINDS.includes(l));
+              return { state: classified ? 'success' : 'failure' };
+            }
+
+            // One fix-instructions comment per PR, ever — not one per push.
+            // The hidden marker identifies our comment; a marker hit from any
+            // earlier run suppresses a new one.
+            const COMPLIANCE_COMMENT_MARKER = '<!-- nanoclaw-template-compliance -->';
+            function shouldPostComplianceComment(state, existingCommentBodies) {
+              if (state !== 'failure') return false;
+              return !(existingCommentBodies || []).some((b) => (b || '').includes(COMPLIANCE_COMMENT_MARKER));
+            }
             // NANOCLAW-LABEL-LOGIC-END
 
             const pr = context.payload.pull_request;
+            const currentLabels = (pr.labels || []).map((l) => l.name);
             const { add, remove, coreTeam } = computeLabels({
               body: pr.body,
               title: pr.title,
               author: pr.user.login,
-              currentLabels: (pr.labels || []).map((l) => l.name),
+              currentLabels,
             });
+
+            // ── Report-only template-compliance status (every event) ──
+            const compliance = decideCompliance({ body: pr.body, add, currentLabels });
+            if (compliance.state !== null) {
+              await github.rest.repos.createCommitStatus({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                sha: pr.head.sha,
+                state: compliance.state,
+                context: 'template-compliance',
+                description:
+                  compliance.state === 'success'
+                    ? 'PR carries a kind classification'
+                    : 'No kind classification — check one kind/* box (report-only, does not block merge)',
+              });
+              if (compliance.state === 'failure') {
+                const existing = await github.rest.issues.listComments({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: pr.number,
+                  per_page: 100,
+                });
+                if (shouldPostComplianceComment(compliance.state, existing.data.map((c) => c.body))) {
+                  // Static text only — never interpolate PR-controlled content
+                  // into a comment posted with write permissions.
+                  await github.rest.issues.createComment({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: pr.number,
+                    body: [
+                      COMPLIANCE_COMMENT_MARKER,
+                      'This PR uses the v2 template but has no kind classification, so the report-only `template-compliance` status is red. It does not block merging.',
+                      '',
+                      'To fix, either:',
+                      '- check exactly one box in the **Change kind** section (`kind/bug`, `kind/feature`, `kind/documentation`, `kind/cleanup`, or `kind/hardening`), or',
+                      '- give the PR a conventional-commit title (`fix:`, `feat:`, `docs:`, `refactor:`, `chore:`, `ci:`, `test:`, `build:`, `style:`, `perf:`) and edit the description to re-trigger labeling.',
+                      '',
+                      'A maintainer can also apply a `kind/*` label directly at triage.',
+                    ].join('\n'),
+                  });
+                }
+              }
+            }
+
+            // ── Label mutations: body events only, never on synchronize ──
+            if (context.payload.action === 'synchronize') return;
 
             if (coreTeam) {
               try {

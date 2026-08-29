@@ -22,12 +22,21 @@ jobs:
             const body = context.payload.pull_request.body || '';
             const labels = [];
 
-            if (body.includes('[x] **Feature skill**'))       { labels.push('PR: Skill'); labels.push('PR: Feature'); }
-            else if (body.includes('[x] **Utility skill**'))   labels.push('PR: Skill');
-            else if (body.includes('[x] **Operational/container skill**')) labels.push('PR: Skill');
-            else if (body.includes('[x] **Fix**'))             labels.push('PR: Fix');
-            else if (body.includes('[x] **Simplification**'))  labels.push('PR: Refactor');
-            else if (body.includes('[x] **Documentation**'))   labels.push('PR: Docs');
+            // Every string pushed below must byte-match an existing repo label
+            // (`gh label list`). addLabels auto-creates unknown names with a
+            // random color and no description, so a typo invents a label.
+            //
+            // Each branch emits both vocabularies: the legacy `PR: *` label the
+            // triage reconciler still reads, and its `kind/*` (+ `delivery/*`)
+            // equivalent in the current taxonomy. Retiring `PR: *` is a separate
+            // decision; until then both must stay in sync.
+
+            if (body.includes('[x] **Feature skill**'))       { labels.push('PR: Skill'); labels.push('PR: Feature'); labels.push('kind/feature'); labels.push('delivery/skill'); }
+            else if (body.includes('[x] **Utility skill**'))   { labels.push('PR: Skill'); labels.push('kind/feature'); labels.push('delivery/skill'); }
+            else if (body.includes('[x] **Operational/container skill**')) { labels.push('PR: Skill'); labels.push('kind/feature'); labels.push('delivery/skill'); }
+            else if (body.includes('[x] **Fix**'))             { labels.push('PR: Fix'); labels.push('kind/bug'); }
+            else if (body.includes('[x] **Simplification**'))  { labels.push('PR: Refactor'); labels.push('kind/cleanup'); }
+            else if (body.includes('[x] **Documentation**'))   { labels.push('PR: Docs'); labels.push('kind/documentation'); }
 
             if (body.includes('contributing-guide: v1')) labels.push('follows-guidelines');
 

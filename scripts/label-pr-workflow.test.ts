@@ -113,6 +113,25 @@ describe('v2 bodies (nanoclaw-pr-template:v2 marker)', () => {
     expect(res.add).toContain('kind/bug');
   });
 
+  it('AI-assistance checkboxes carry no label semantics and do not confuse the kind parser', () => {
+    const ai =
+      '## AI assistance\n' +
+      '- [ ] No AI assistance\n' +
+      '- [ ] AI-assisted: a person wrote this with AI help\n' +
+      '- [x] Agent-authored: an AI agent wrote this\n' +
+      '- [x] A human has reviewed this PR and stands behind every change\n';
+    const withKind = computeLabels({ body: v2Body(['kind/bug']) + ai, title: 'x', author: FORK_AUTHOR });
+    expect(withKind.add).toContain('kind/bug');
+    expect(withKind.add.filter((l) => l.startsWith('kind/'))).toEqual(['kind/bug']);
+    expect(withKind.add).not.toContain('delivery/skill');
+
+    // No kind box checked: the AI section must not register as a kind or a
+    // skill, and the title fallback still decides.
+    const fallback = computeLabels({ body: v2Body([]) + ai, title: 'docs: clarify setup', author: FORK_AUTHOR });
+    expect(fallback.add).toContain('kind/documentation');
+    expect(fallback.add).not.toContain('PR: Skill');
+  });
+
   it('chore and refactor title prefixes both map to kind/cleanup', () => {
     for (const title of ['chore(deps): bump x', 'refactor: flatten y']) {
       const res = computeLabels({ body: v2Body([]), title, author: FORK_AUTHOR });

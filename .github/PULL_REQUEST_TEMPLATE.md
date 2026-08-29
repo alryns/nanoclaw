@@ -36,3 +36,13 @@ Closes #
 
 - [ ] Not a skill
 - [ ] Skill: apply/remove footprint and fresh-clone verification are described above
+
+## AI assistance
+
+<!-- Check exactly one. -->
+- [ ] No AI assistance
+- [ ] AI-assisted: a person wrote this with AI help
+- [ ] Agent-authored: an AI agent wrote this
+
+<!-- Required when either AI box above is checked. -->
+- [ ] A human has reviewed this PR and stands behind every change

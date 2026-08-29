@@ -68,13 +68,20 @@ function complianceFor(body: string, title: string, currentLabels: string[] = []
   return decideCompliance({ body, add, currentLabels });
 }
 
+/** Raw workflow text, for fixtures that couple prose promises to parser behavior. */
+function workflowText(): string {
+  return fs.readFileSync(path.join(__dirname, '..', '.github', 'workflows', 'label-pr.yml'), 'utf8');
+}
+
 const V2 = '<!-- nanoclaw-pr-template:v2 -->\n';
+/** The kind boxes the PR template offers, i.e. every kind a verdict can name. */
+const TEMPLATE_KINDS = ['kind/bug', 'kind/feature', 'kind/documentation', 'kind/cleanup', 'kind/hardening'];
 // Blank template: no kind box, neither skill box. `skill: true` checks the
 // Skill box; `notSkill: true` checks the "Not a skill" box.
 const v2Body = (kinds: string[], opts: { skill?: boolean; notSkill?: boolean } = {}) =>
   V2 +
   '## Change kind\n' +
-  ['kind/bug', 'kind/feature', 'kind/documentation', 'kind/cleanup', 'kind/hardening']
+  TEMPLATE_KINDS
     .map((k) => `- [${kinds.includes(k) ? 'x' : ' '}] \`${k}\``)
     .join('\n') +
   '\n## Skill delivery\n' +
@@ -343,6 +350,41 @@ describe('template-compliance (report-only)', () => {
     // Green states never comment.
     expect(shouldPostComplianceComment('success', [])).toBe(false);
     expect(shouldPostComplianceComment(null, [])).toBe(false);
+  });
+
+  it('decideCompliance recognizes every kind computeLabels can emit', () => {
+    // computeLabels and decideCompliance share one MANAGED_KINDS declaration.
+    // This pins the property that declaration exists to protect: a kind the
+    // parser can emit must also count as a classification, so an honestly
+    // filled-in template can never leave the status red.
+    for (const kind of TEMPLATE_KINDS) {
+      const res = computeLabels({ body: v2Body([kind]), title: 'Update stuff', author: FORK_AUTHOR });
+      expect(res.add).toContain(kind);
+      expect(complianceFor(v2Body([kind]), 'Update stuff').state).toBe('success');
+      // Same kind arriving as maintainer triage rather than a checkbox.
+      expect(complianceFor(v2Body([]), 'Update stuff', [kind]).state).toBe('success');
+    }
+  });
+
+  it('every conventional-commit prefix the fix comment promises actually maps to a kind', () => {
+    // The comment tells contributors a conventional-commit title will classify
+    // the PR, and names the prefixes. Read them back out of that sentence so
+    // the promise cannot drift away from what the parser accepts.
+    const line = workflowText()
+      .split('\n')
+      .find((l) => l.includes('give the PR a conventional-commit title'));
+    expect(line, 'fix-comment prefix sentence not found in label-pr.yml').toBeDefined();
+    const promised = [...(line as string).matchAll(/`([a-z]+):`/g)].map((m) => m[1]);
+    expect(promised).toEqual(['fix', 'feat', 'docs', 'refactor', 'chore', 'ci', 'test', 'build', 'style', 'perf']);
+    for (const prefix of promised) {
+      const res = computeLabels({
+        body: v2Body([]),
+        title: `${prefix}: something`,
+        author: FORK_AUTHOR,
+        currentLabels: [],
+      });
+      expect(res.add.filter((l) => l.startsWith('kind/')), `prefix ${prefix}: promised a kind, got none`).toHaveLength(1);
+    }
   });
 });
 

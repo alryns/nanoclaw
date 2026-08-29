@@ -18,6 +18,14 @@ on:
     # labels-only-on-body-events behavior.
     types: [opened, edited, reopened, ready_for_review, synchronize]
 
+# Serialize runs per PR. Two events landing together (a push and a body edit)
+# would otherwise race on the check-then-act that posts the single fix comment,
+# and both runs could see no comment and post one. Queue rather than cancel:
+# a cancelled run leaves the commit status for its SHA unwritten.
+concurrency:
+  group: label-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
 jobs:
   label:
     runs-on: ubuntu-latest
@@ -87,6 +95,12 @@ jobs:
               return out.join('\n');
             }
 
+            // The managed kind vocabulary, shared by the two functions that
+            // must agree on it: computeLabels emits from this set, and
+            // decideCompliance reads it to decide whether a PR is classified.
+            // One declaration, so the two can never drift apart.
+            const MANAGED_KINDS = ['kind/bug', 'kind/feature', 'kind/documentation', 'kind/cleanup', 'kind/hardening'];
+
             function computeLabels({ body, title, author, currentLabels }) {
               body = body || '';
               title = title || '';
@@ -94,7 +108,6 @@ jobs:
               const add = [];
               const remove = [];
 
-              const MANAGED_KINDS = ['kind/bug', 'kind/feature', 'kind/documentation', 'kind/cleanup', 'kind/hardening'];
               // Legacy vocabulary kept in lockstep until Decision 4. Hardening
               // has no PR:* equivalent, so none is emitted rather than
               // guessing one.
@@ -195,7 +208,6 @@ jobs:
             //   - v1 / no-marker bodies → null: untouched, no status at all.
             function decideCompliance({ body, add, currentLabels }) {
               if (!(body || '').includes('<!-- nanoclaw-pr-template:v2 -->')) return { state: null };
-              const MANAGED_KINDS = ['kind/bug', 'kind/feature', 'kind/documentation', 'kind/cleanup', 'kind/hardening'];
               const classified =
                 add.some((l) => MANAGED_KINDS.includes(l)) ||
                 (currentLabels || []).some((l) => MANAGED_KINDS.includes(l));
@@ -236,13 +248,17 @@ jobs:
                     : 'No kind classification — check one kind/* box (report-only, does not block merge)',
               });
               if (compliance.state === 'failure') {
-                const existing = await github.rest.issues.listComments({
+                // Paginate: the 'one comment ever' guarantee is a check-then-act
+                // over the whole comment list, so reading only the first page
+                // would re-post on any PR whose discussion has outgrown it.
+                // github.paginate returns the flat array, not a { data } envelope.
+                const existing = await github.paginate(github.rest.issues.listComments, {
                   owner: context.repo.owner,
                   repo: context.repo.repo,
                   issue_number: pr.number,
                   per_page: 100,
                 });
-                if (shouldPostComplianceComment(compliance.state, existing.data.map((c) => c.body))) {
+                if (shouldPostComplianceComment(compliance.state, existing.map((c) => c.body))) {
                   // Static text only — never interpolate PR-controlled content
                   // into a comment posted with write permissions.
                   await github.rest.issues.createComment({
@@ -257,7 +273,7 @@ jobs:
                       '- check exactly one box in the **Change kind** section (`kind/bug`, `kind/feature`, `kind/documentation`, `kind/cleanup`, or `kind/hardening`), or',
                       '- give the PR a conventional-commit title (`fix:`, `feat:`, `docs:`, `refactor:`, `chore:`, `ci:`, `test:`, `build:`, `style:`, `perf:`) and edit the description to re-trigger labeling.',
                       '',
-                      'A maintainer can also apply a `kind/*` label directly at triage.',
+                      'A maintainer can also apply a `kind/*` label directly. Applying the label does not clear this status on its own: the status is recalculated on the next push or description edit.',
                     ].join('\n'),
                   });
                 }

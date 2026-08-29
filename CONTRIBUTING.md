@@ -163,16 +163,25 @@ Test your contribution on a fresh clone before submitting. For skills, run the s
 1. **Link related issues.** If your PR resolves an open issue, include `Closes #123` in the description so it's auto-closed on merge.
 2. **Test thoroughly.** Run the feature yourself. For skills, test on a fresh clone.
 3. **Check for installation-specific files.** Before creating a PR, verify no installation-specific files are in your diff (see PR Hygiene in CLAUDE.md).
-4. **Check the right box** in the PR template. Labels are auto-applied based on your selection:
+4. **Check exactly one change kind** in the PR template. The kind label is auto-applied from your selection:
 
-| Checkbox | Label |
-|----------|-------|
-| Feature skill | `PR: Skill` + `PR: Feature` |
-| Utility skill | `PR: Skill` |
-| Operational/container skill | `PR: Skill` |
-| Fix | `PR: Fix` |
-| Simplification | `PR: Refactor` |
-| Documentation | `PR: Docs` |
+| Checkbox | Meaning |
+|----------|---------|
+| `kind/bug` | Something is not working as expected |
+| `kind/feature` | New capability or improvement |
+| `kind/documentation` | Documentation is wrong, missing, or unclear |
+| `kind/cleanup` | Refactor or cleanup with no behavior change |
+| `kind/hardening` | Defense-in-depth improvement; not an exploitable vulnerability |
+
+   Check one box, not several — with zero or multiple boxes checked, the workflow falls back to your PR title's [conventional-commit](https://www.conventionalcommits.org/) prefix (`fix:` → `kind/bug`, `feat:` → `kind/feature`, `docs:` → `kind/documentation`, `refactor:`/`chore:` → `kind/cleanup`). If that is ambiguous too, no kind is applied and a maintainer classifies the PR at triage; nothing is auto-closed.
+
+5. **Skill delivery is separate from kind.** If your PR ships a skill, check the skill box in the Skill delivery section — a skill can be a feature, a fix, or a docs change, and the checkbox adds `delivery/skill` without changing the kind.
+
+6. **AI assistance.** If AI tools or agents helped produce the change, check the disclosure box. The human-review attestation — "A human has reviewed this PR and stands behind every change" — is required either way: you must stand behind every line you submit.
+
+7. **Opening PRs from the CLI or API** (`gh pr create`, agents): GitHub does not apply the template there, so paste `.github/PULL_REQUEST_TEMPLATE.md` into the body — or at minimum use a conventional-commit title so the kind fallback can classify the PR.
+
+Area labels (`area/*`) are applied automatically from the files your PR touches; you don't pick one.
 
 ### PR description
 

@@ -1,5 +1,9 @@
 <!-- nanoclaw-pr-template:v2 -->
 
+<!-- Please give this PR a conventional-commit title (`fix:`, `feat:`, `docs:`,
+     `refactor:`, `chore:`, `ci:`, `test:`, `build:`, `style:`, `perf:`) —
+     a request, not a requirement; it helps labeling when no kind box is checked. -->
+
 ## Summary
 
 <!-- What changed, why it matters, and the intended outcome. -->

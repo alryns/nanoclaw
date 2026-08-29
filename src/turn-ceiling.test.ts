@@ -18,6 +18,7 @@ describe('parseTurnCeilingMs', () => {
     expect(parseTurnCeilingMs(3_600_000)).toBe(3_600_000);
     expect(parseTurnCeilingMs('3600000')).toBe(3_600_000);
     expect(parseTurnCeilingMs(' 3600000 ')).toBe(3_600_000);
+    expect(parseTurnCeilingMs('1e7')).toBe(10_000_000); // scientific notation is still an integer
   });
 
   it('rejects unset, empty, non-numeric, fractional, and below-floor values', () => {
@@ -25,7 +26,6 @@ describe('parseTurnCeilingMs', () => {
     expect(parseTurnCeilingMs(null)).toBeUndefined();
     expect(parseTurnCeilingMs('')).toBeUndefined();
     expect(parseTurnCeilingMs('30 minutes')).toBeUndefined();
-    expect(parseTurnCeilingMs('1e7')).toBe(10_000_000); // scientific notation is still an integer
     expect(parseTurnCeilingMs(1.5)).toBeUndefined();
     expect(parseTurnCeilingMs(0)).toBeUndefined();
     expect(parseTurnCeilingMs(-1)).toBeUndefined();

@@ -10,6 +10,12 @@ import type { Migration } from './index.js';
  *
  * No backfill: existing rows stay NULL (= install default), reproducing
  * pre-migration behavior exactly.
+ *
+ * Unlike sibling 020 (same ALTER TABLE ADD COLUMN shape), this migration
+ * does NOT declare `sqliteOnly`: 020 predates the portability boundary and
+ * lives in the frozen SQLite-only set, while every post-boundary migration
+ * must be portable — ADD COLUMN with a plain INTEGER type is, and
+ * portability.test.ts enforces the split.
  */
 export const migration024: Migration = {
   version: 24,

@@ -54,9 +54,26 @@ const SWEEP_INTERVAL_MS = 60_000;
 // actively decoding (#3643).
 export const ABSOLUTE_CEILING_MS = DEFAULT_TURN_CEILING_MS;
 
-async function groupTurnCeilingMs(agentGroupId: string): Promise<number> {
+// Per-tick cache of resolved ceilings, keyed by agent group. One central-DB
+// read per agent group per sweep tick (not per session), taken BEFORE the
+// session mailbox is opened so serialized mailbox implementations never hold
+// a central read inside the session transaction. Cleared at the top of every
+// tick, so a `ncl groups config update --turn-ceiling-ms` change is honored
+// on the next tick — the no-restart apply semantic with a staleness bound of
+// one SWEEP_INTERVAL_MS (60s).
+const turnCeilingCache = new Map<string, number>();
+
+export function _clearTurnCeilingCacheForTesting(): void {
+  turnCeilingCache.clear();
+}
+
+export async function groupTurnCeilingMs(agentGroupId: string): Promise<number> {
+  const cached = turnCeilingCache.get(agentGroupId);
+  if (cached !== undefined) return cached;
   const row = await getContainerConfig(agentGroupId);
-  return resolveTurnCeilingMs(row?.turn_ceiling_ms, TURN_CEILING_MS_RAW);
+  const resolved = resolveTurnCeilingMs(row?.turn_ceiling_ms, TURN_CEILING_MS_RAW);
+  turnCeilingCache.set(agentGroupId, resolved);
+  return resolved;
 }
 // Stuck tolerance window applied per 'processing' claim — "did we see any
 // signs of life since this message was claimed?"
@@ -138,6 +155,10 @@ export function stopHostSweep(): void {
 async function sweep(): Promise<void> {
   if (!running) return;
 
+  // New tick: re-resolve group turn ceilings so config changes apply without
+  // a restart (staleness bound = one sweep interval).
+  turnCeilingCache.clear();
+
   // Re-heal the egress network so already-running agents keep their gateway hop
   // if it was detached out-of-band. Best-effort here: a heal failure isn't a
   // leak (agents stay on the internal net), so log and continue. No-op when
@@ -188,12 +209,15 @@ async function sweepSession(session: Session): Promise<void> {
   try {
     let dueCount = 0;
     let shouldWake = false;
+    // Resolved outside the mailbox session: central-DB reads must not ride
+    // inside the session transaction (see the wake-path comment below).
+    const turnCeilingMs = await groupTurnCeilingMs(agentGroup.id);
     const exists = await withExistingMailboxSession(agentGroup.id, session.id, async (mailbox) => {
       mailbox.applyProcessingAcks(mailbox.getTerminalProcessingAcks());
       dueCount = mailbox.countDueMessages();
       shouldWake = dueCount > 0 && !isContainerRunning(session.id);
       if (!shouldWake) {
-        await maintainSessionMailbox(mailbox, session, agentGroup.id, false);
+        await maintainSessionMailbox(mailbox, session, agentGroup.id, false, turnCeilingMs);
       }
       return true;
     });
@@ -208,7 +232,7 @@ async function sweepSession(session: Session): Promise<void> {
     await wakeContainer(session);
 
     await withExistingMailboxSession(agentGroup.id, session.id, async (mailbox) => {
-      await maintainSessionMailbox(mailbox, session, agentGroup.id, true);
+      await maintainSessionMailbox(mailbox, session, agentGroup.id, true, turnCeilingMs);
     });
   } catch (err) {
     log.error('Session mailbox sweep failed', {
@@ -224,10 +248,11 @@ async function maintainSessionMailbox(
   session: Session,
   agentGroupId: string,
   justWoke: boolean,
+  turnCeilingMs: number,
 ): Promise<void> {
   const alive = isContainerRunning(session.id);
   if (alive && !justWoke) {
-    enforceRunningContainerSla(mailbox, mailbox, session, agentGroupId, await groupTurnCeilingMs(agentGroupId));
+    enforceRunningContainerSla(mailbox, mailbox, session, agentGroupId, turnCeilingMs);
   }
   if (!alive) {
     resetStuckProcessingRows(mailbox, mailbox, session, 'container not running');

@@ -133,11 +133,11 @@ describe('chat-sdk-bridge approval-card terminal state', () => {
   });
 
   it('renders a rejected decision with the actor and original body', async () => {
-    const { edits, actions } = await fireAction({ userId: 'U4', userName: 'daniel' }, 'reject');
+    const { edits, actions } = await fireAction({ userId: 'U4', userName: 'reviewer' }, 'reject');
 
     expect(terminalText(edits[0])).toEqual([
       { type: 'text', content: 'Keep these full request details.' },
-      { type: 'text', content: '❌ Rejected by daniel', style: 'muted' },
+      { type: 'text', content: '❌ Rejected by reviewer', style: 'muted' },
     ]);
     expect(actions).toEqual(['q-1:reject:U4']);
   });

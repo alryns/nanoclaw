@@ -35,22 +35,57 @@ jobs:
             // name that is not in the fixed vocabularies below.
             //
             // Two body contracts, selected by marker:
-            //   v2 (`nanoclaw-pr-template:v2`): stable-token parsing — exactly
-            //     one managed `kind/*` checkbox; a conventional-commit title
-            //     prefix is the fallback when zero or several boxes are
-            //     checked; still ambiguous → apply no kind and leave the PR
-            //     for triage (never guess). The managed kind set is
-            //     reconciled: stale managed kinds are removed before the
-            //     current one is added.
+            //   v2 (the exact HTML comment `<!-- nanoclaw-pr-template:v2 -->`):
+            //     stable-token parsing on flush-left checkbox lines, with
+            //     fenced blocks stripped first. Exactly one checked kind box
+            //     is an explicit verdict: it is added and the managed set is
+            //     reconciled — stale kinds AND their legacy `PR: *` twins are
+            //     removed, keeping the two vocabularies in lockstep. With
+            //     zero or several boxes, the conventional-commit title prefix
+            //     is an ADVISORY fallback: it only adds a kind when the PR
+            //     carries no managed kind at all, and it never removes
+            //     anything — so a maintainer's triage classification always
+            //     survives later edited/reopened/ready_for_review events.
+            //     Still ambiguous → apply nothing; the PR lands in triage.
             //   v1 (`contributing-guide: v1`, or no marker): the pre-v2
             //     behavior, byte-frozen — visible-substring checkbox matching,
             //     add-only, emitting both the legacy `PR: *` vocabulary and
             //     its `kind/*` equivalent.
-            // Both paths keep emitting `PR: *` and `follows-guidelines` until
-            // Decision 4 retires them.
-            function computeLabels({ body, title, author }) {
+            // Both paths keep emitting `PR: *`; v2 earns `follows-guidelines`
+            // only from an explicit checkbox verdict (an unfilled template
+            // earns nothing). All of `PR: *`, `follows-guidelines`, and
+            // `core-team` stay until Decision 4 retires them.
+
+            // Drop fenced code blocks (``` and ~~~, any info string). A line
+            // scanner rather than a regex so an UNTERMINATED fence hides
+            // everything after it instead of nothing, and so ``` cannot close
+            // a ~~~ fence. Fences must be flush-left, like the checkbox
+            // tokens they protect.
+            function stripFences(text) {
+              const out = [];
+              let fence = null;
+              for (const line of text.split('\n')) {
+                const open = /^(`{3,}|~{3,})/.exec(line);
+                if (open) {
+                  if (fence === null) {
+                    fence = open[1][0];
+                    continue;
+                  }
+                  if (line[0] === fence) {
+                    fence = null;
+                    continue;
+                  }
+                  continue; // a ``` line inside a ~~~ fence (or vice versa) stays hidden
+                }
+                if (fence === null) out.push(line);
+              }
+              return out.join('\n');
+            }
+
+            function computeLabels({ body, title, author, currentLabels }) {
               body = body || '';
               title = title || '';
+              const current = new Set(currentLabels || []);
               const add = [];
               const remove = [];
 
@@ -71,6 +106,11 @@ jobs:
                 docs: 'kind/documentation',
                 refactor: 'kind/cleanup',
                 chore: 'kind/cleanup',
+                ci: 'kind/cleanup',
+                test: 'kind/cleanup',
+                build: 'kind/cleanup',
+                style: 'kind/cleanup',
+                perf: 'kind/cleanup',
               };
 
               // Lowercase GitHub logins; keep in sync with the core team roster.
@@ -78,36 +118,51 @@ jobs:
               const coreTeam = CORE_TEAM.includes((author || '').toLowerCase());
               if (coreTeam) add.push('core-team');
 
-              if (body.includes('nanoclaw-pr-template:v2')) {
-                // ── v2: stable-token parsing + managed-kind reconcile ──
-                // Fenced code blocks (the release-note block included) are
-                // stripped before token matching, so checkbox-looking text
-                // pasted inside a fence can never register as a selection.
-                const scanned = body.replace(/```[\s\S]*?```/g, '');
+              if (body.includes('<!-- nanoclaw-pr-template:v2 -->')) {
+                // ── v2: stable-token parsing ──
+                const scanned = stripFences(body);
                 const checked = MANAGED_KINDS.filter((kind) =>
-                  new RegExp('-\\s*\\[[xX]\\]\\s*`' + kind.replace('/', '\\/') + '`').test(scanned),
+                  new RegExp('^-\\s*\\[[xX]\\]\\s*`' + kind.replace('/', '\\/') + '`', 'm').test(scanned),
                 );
-                let kind = checked.length === 1 ? checked[0] : undefined;
-                if (kind === undefined) {
-                  // Zero or several boxes: fall back to the conventional-commit
-                  // title prefix; if that is ambiguous too, apply nothing.
-                  const m = /^([a-z]+)(\([^)]*\))?!?:/.exec(title.trim());
-                  if (m && TITLE_PREFIX_TO_KIND[m[1]]) kind = TITLE_PREFIX_TO_KIND[m[1]];
-                }
-                if (kind !== undefined) {
+
+                if (checked.length === 1) {
+                  // Explicit checkbox verdict: add, and reconcile BOTH
+                  // vocabularies so an edited selection swaps cleanly instead
+                  // of accumulating (kind/bug leaving and PR: Fix staying
+                  // would desync the legacy set the triage queue still reads).
+                  const kind = checked[0];
                   add.push(kind);
                   if (KIND_TO_LEGACY[kind]) add.push(KIND_TO_LEGACY[kind]);
-                  // Reconcile only what this parser owns, and only when it
-                  // reached a verdict: stale managed kinds are removed so an
-                  // edited selection does not accumulate. With no verdict,
-                  // nothing is removed — a maintainer-applied kind must survive.
-                  for (const stale of MANAGED_KINDS) if (stale !== kind) remove.push(stale);
+                  for (const stale of MANAGED_KINDS) {
+                    if (stale === kind) continue;
+                    remove.push(stale);
+                    if (KIND_TO_LEGACY[stale]) remove.push(KIND_TO_LEGACY[stale]);
+                  }
+                  add.push('follows-guidelines');
+                } else {
+                  // Zero or several boxes: the conventional-commit title
+                  // prefix is advisory — it fills a blank, never overrules.
+                  // No removals, and no addition when the PR already carries
+                  // a managed kind (maintainer triage wins).
+                  const m = /^([a-z]+)(\([^)]*\))?!?:/.exec(title.trim());
+                  const kind = m ? TITLE_PREFIX_TO_KIND[m[1]] : undefined;
+                  const hasManagedKind = MANAGED_KINDS.some((k) => current.has(k));
+                  if (kind !== undefined && !hasManagedKind) {
+                    add.push(kind);
+                    if (KIND_TO_LEGACY[kind]) add.push(KIND_TO_LEGACY[kind]);
+                  }
                 }
-                if (/-\s*\[[xX]\]\s*Skill:/.test(scanned)) {
+
+                // Skill delivery: explicit checkbox verdicts only, kept in
+                // lockstep with its legacy twin. No box checked → no verdict,
+                // nothing changes.
+                if (/^-\s*\[[xX]\]\s*Skill:/m.test(scanned)) {
                   add.push('delivery/skill');
                   add.push('PR: Skill');
+                } else if (/^-\s*\[[xX]\]\s*Not a skill/m.test(scanned)) {
+                  remove.push('delivery/skill');
+                  remove.push('PR: Skill');
                 }
-                add.push('follows-guidelines');
               } else {
                 // ── v1: pre-v2 behavior, byte-frozen (add-only) ──
                 if (body.includes('[x] **Feature skill**'))       { add.push('PR: Skill'); add.push('PR: Feature'); add.push('kind/feature'); add.push('delivery/skill'); }
@@ -129,6 +184,7 @@ jobs:
               body: pr.body,
               title: pr.title,
               author: pr.user.login,
+              currentLabels: (pr.labels || []).map((l) => l.name),
             });
 
             if (coreTeam) {

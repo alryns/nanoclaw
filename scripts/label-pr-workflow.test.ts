@@ -17,7 +17,12 @@ interface LabelDecision {
   coreTeam: boolean;
 }
 
-type ComputeLabels = (args: { body?: string | null; title?: string | null; author?: string | null }) => LabelDecision;
+type ComputeLabels = (args: {
+  body?: string | null;
+  title?: string | null;
+  author?: string | null;
+  currentLabels?: string[];
+}) => LabelDecision;
 
 function extractComputeLabels(): ComputeLabels {
   const workflow = fs.readFileSync(
@@ -42,20 +47,23 @@ function extractComputeLabels(): ComputeLabels {
 const computeLabels = extractComputeLabels();
 
 const V2 = '<!-- nanoclaw-pr-template:v2 -->\n';
-const v2Body = (kinds: string[], opts: { skill?: boolean } = {}) =>
+// Blank template: no kind box, neither skill box. `skill: true` checks the
+// Skill box; `notSkill: true` checks the "Not a skill" box.
+const v2Body = (kinds: string[], opts: { skill?: boolean; notSkill?: boolean } = {}) =>
   V2 +
   '## Change kind\n' +
   ['kind/bug', 'kind/feature', 'kind/documentation', 'kind/cleanup', 'kind/hardening']
     .map((k) => `- [${kinds.includes(k) ? 'x' : ' '}] \`${k}\``)
     .join('\n') +
   '\n## Skill delivery\n' +
-  `- [${opts.skill ? ' ' : 'x'}] Not a skill\n` +
+  `- [${opts.notSkill ? 'x' : ' '}] Not a skill\n` +
   `- [${opts.skill ? 'x' : ' '}] Skill: apply/remove footprint and fresh-clone verification are described above\n`;
 
 const FORK_AUTHOR = 'drive-by-contributor';
+const LEGACY_TWINS = ['PR: Fix', 'PR: Feature', 'PR: Docs', 'PR: Refactor'];
 
-describe('v2 bodies (nanoclaw-pr-template:v2 marker)', () => {
-  it('exactly one checked kind: adds it, its legacy twin, and removes the other managed kinds', () => {
+describe('v2 bodies — explicit checkbox verdicts', () => {
+  it('one checked kind: adds it + its legacy twin, reconciles BOTH vocabularies', () => {
     const res = computeLabels({ body: v2Body(['kind/bug']), title: 'anything', author: FORK_AUTHOR });
     expect(res.add).toContain('kind/bug');
     expect(res.add).toContain('PR: Fix');
@@ -63,27 +71,78 @@ describe('v2 bodies (nanoclaw-pr-template:v2 marker)', () => {
     expect(res.remove).toEqual(
       expect.arrayContaining(['kind/feature', 'kind/documentation', 'kind/cleanup', 'kind/hardening']),
     );
+    // B2: the stale kinds' legacy twins go too — no PR: Fix + PR: Refactor pileup.
+    expect(res.remove).toEqual(expect.arrayContaining(['PR: Feature', 'PR: Docs', 'PR: Refactor']));
     expect(res.remove).not.toContain('kind/bug');
+    expect(res.remove).not.toContain('PR: Fix');
   });
 
-  it('kind/hardening has no legacy PR:* twin', () => {
+  it('reclassifying bug -> cleanup removes kind/bug AND PR: Fix in the same pass', () => {
+    const res = computeLabels({
+      body: v2Body(['kind/cleanup']),
+      title: 'x',
+      author: FORK_AUTHOR,
+      currentLabels: ['kind/bug', 'PR: Fix'],
+    });
+    expect(res.add).toEqual(expect.arrayContaining(['kind/cleanup', 'PR: Refactor']));
+    expect(res.remove).toContain('kind/bug');
+    expect(res.remove).toContain('PR: Fix');
+  });
+
+  it('kind/hardening has no legacy PR:* twin, added or removed', () => {
     const res = computeLabels({ body: v2Body(['kind/hardening']), title: 'x', author: FORK_AUTHOR });
     expect(res.add).toContain('kind/hardening');
     expect(res.add.filter((l) => l.startsWith('PR: '))).toEqual([]);
+    expect(res.remove).toEqual(expect.arrayContaining(LEGACY_TWINS));
   });
 
-  it('zero checked kinds: falls back to the conventional-commit title prefix', () => {
-    const res = computeLabels({ body: v2Body([]), title: 'fix(host-sweep): make the ceiling configurable', author: FORK_AUTHOR });
-    expect(res.add).toContain('kind/bug');
-    expect(res.add).toContain('PR: Fix');
-    expect(res.remove).toContain('kind/feature');
+  it('skill checkbox adds delivery/skill + PR: Skill; "Not a skill" removes both; neither box changes nothing', () => {
+    const on = computeLabels({ body: v2Body(['kind/bug'], { skill: true }), title: 'x', author: FORK_AUTHOR });
+    expect(on.add).toEqual(expect.arrayContaining(['delivery/skill', 'PR: Skill']));
+
+    const off = computeLabels({ body: v2Body(['kind/bug'], { notSkill: true }), title: 'x', author: FORK_AUTHOR });
+    expect(off.remove).toEqual(expect.arrayContaining(['delivery/skill', 'PR: Skill']));
+
+    const blank = computeLabels({ body: v2Body(['kind/bug']), title: 'x', author: FORK_AUTHOR });
+    expect(blank.add).not.toContain('delivery/skill');
+    expect(blank.remove).not.toContain('delivery/skill');
+  });
+});
+
+describe('v2 bodies — advisory title fallback (B1: never removes, never overrules)', () => {
+  it('zero boxes + mappable title + no existing kind: adds kind + twin, removes NOTHING', () => {
+    const res = computeLabels({
+      body: v2Body([]),
+      title: 'fix(host-sweep): make the ceiling configurable',
+      author: FORK_AUTHOR,
+      currentLabels: [],
+    });
+    expect(res.add).toEqual(expect.arrayContaining(['kind/bug', 'PR: Fix']));
+    expect(res.remove).toEqual([]);
   });
 
-  it('multiple checked kinds: title prefix decides, checkboxes are ignored', () => {
-    const res = computeLabels({ body: v2Body(['kind/bug', 'kind/feature']), title: 'docs: fix a typo', author: FORK_AUTHOR });
+  it("maintainer reclassification survives a later edited event: fallback adds nothing when a managed kind is present", () => {
+    // PR titled fix:, no box checked; maintainer set kind/cleanup at triage.
+    const res = computeLabels({
+      body: v2Body([]),
+      title: 'fix: something',
+      author: FORK_AUTHOR,
+      currentLabels: ['kind/cleanup', 'PR: Refactor'],
+    });
+    expect(res.add.filter((l) => l.startsWith('kind/') || l.startsWith('PR: '))).toEqual([]);
+    expect(res.remove).toEqual([]);
+  });
+
+  it('multiple checked boxes: no checkbox verdict — title is advisory, no removals', () => {
+    const res = computeLabels({
+      body: v2Body(['kind/bug', 'kind/feature']),
+      title: 'docs: fix a typo',
+      author: FORK_AUTHOR,
+      currentLabels: [],
+    });
     expect(res.add).toContain('kind/documentation');
     expect(res.add).not.toContain('kind/bug');
-    expect(res.add).not.toContain('kind/feature');
+    expect(res.remove).toEqual([]);
   });
 
   it('still ambiguous (no boxes, unmappable title): applies no kind and removes nothing', () => {
@@ -92,12 +151,40 @@ describe('v2 bodies (nanoclaw-pr-template:v2 marker)', () => {
     expect(res.remove).toEqual([]);
   });
 
-  it('edited selection reconciles: the newly checked kind lands, every other managed kind is removed', () => {
-    // Simulates the second run after an author unchecks bug and checks cleanup.
-    const res = computeLabels({ body: v2Body(['kind/cleanup']), title: 'x', author: FORK_AUTHOR });
-    expect(res.add).toContain('kind/cleanup');
-    expect(res.add).toContain('PR: Refactor');
-    expect(res.remove).toContain('kind/bug');
+  it('repo-convention prefixes ci/test/build/style/perf map to kind/cleanup, chore/refactor too', () => {
+    for (const title of ['ci(labels): x', 'test: y', 'build(deps): z', 'style: w', 'perf: v', 'chore(deps): u', 'refactor: t']) {
+      const res = computeLabels({ body: v2Body([]), title, author: FORK_AUTHOR, currentLabels: [] });
+      expect(res.add, title).toContain('kind/cleanup');
+    }
+  });
+
+  it('follows-guidelines is earned only by a checkbox verdict, not by the bare marker or the fallback', () => {
+    const unfilled = computeLabels({ body: v2Body([]), title: 'fix: x', author: FORK_AUTHOR });
+    expect(unfilled.add).not.toContain('follows-guidelines');
+    const filled = computeLabels({ body: v2Body(['kind/bug']), title: 'x', author: FORK_AUTHOR });
+    expect(filled.add).toContain('follows-guidelines');
+  });
+});
+
+describe('v2 bodies — token robustness', () => {
+  it('marker requires the exact HTML comment: a prose mention stays on the v1 path', () => {
+    const res = computeLabels({
+      body: 'I copied nanoclaw-pr-template:v2 from docs\n- [x] `kind/bug`',
+      title: 'feat: x',
+      author: FORK_AUTHOR,
+    });
+    // v1 path: backticked kind tokens mean nothing there, and no v1 boxes are checked.
+    expect(res.add.filter((l) => l.startsWith('kind/') || l.startsWith('PR: '))).toEqual([]);
+    expect(res.remove).toEqual([]);
+  });
+
+  it('checkbox tokens must start the line: inline and indented mentions do not register', () => {
+    const body =
+      V2 +
+      'see - [x] `kind/bug` discussed inline\n' +
+      '  - [x] `kind/feature` (indented, quoted from another PR)\n';
+    const res = computeLabels({ body, title: 'Update stuff', author: FORK_AUTHOR });
+    expect(res.add.filter((l) => l.startsWith('kind/'))).toEqual([]);
   });
 
   it('checkbox case: [X] counts as checked', () => {
@@ -106,11 +193,30 @@ describe('v2 bodies (nanoclaw-pr-template:v2 marker)', () => {
     expect(res.add).toContain('kind/feature');
   });
 
-  it('skill delivery checkbox adds delivery/skill and the legacy PR: Skill', () => {
-    const res = computeLabels({ body: v2Body(['kind/bug'], { skill: true }), title: 'x', author: FORK_AUTHOR });
-    expect(res.add).toContain('delivery/skill');
-    expect(res.add).toContain('PR: Skill');
-    expect(res.add).toContain('kind/bug');
+  it('a filled release-note block carries no label semantics', () => {
+    const note =
+      '## User and release impact\n' +
+      '- [x] User-visible change — release note below\n' +
+      '```release-note\n' +
+      'Fixes `kind/bug` handling.\n' +
+      '- [x] `kind/feature`\n' +
+      '```\n';
+    const res = computeLabels({ body: v2Body(['kind/cleanup']) + note, title: 'x', author: FORK_AUTHOR });
+    expect(res.add.filter((l) => l.startsWith('kind/'))).toEqual(['kind/cleanup']);
+    expect(res.remove).toContain('kind/bug');
+    expect(res.remove).toContain('PR: Fix');
+  });
+
+  it('~~~ fences hide checkbox-looking text too', () => {
+    const body = v2Body(['kind/cleanup']) + '~~~\n- [x] `kind/bug`\n~~~\n';
+    const res = computeLabels({ body, title: 'x', author: FORK_AUTHOR });
+    expect(res.add.filter((l) => l.startsWith('kind/'))).toEqual(['kind/cleanup']);
+  });
+
+  it('an unterminated fence hides everything after it', () => {
+    const body = v2Body([]) + '```\n- [x] `kind/bug`\n';
+    const res = computeLabels({ body, title: 'Update stuff', author: FORK_AUTHOR });
+    expect(res.add.filter((l) => l.startsWith('kind/'))).toEqual([]);
   });
 
   it('AI-assistance checkboxes carry no label semantics and do not confuse the kind parser', () => {
@@ -119,34 +225,8 @@ describe('v2 bodies (nanoclaw-pr-template:v2 marker)', () => {
       '- [x] AI tools or agents helped produce this change\n' +
       '- [x] A human has reviewed this PR and stands behind every change\n';
     const withKind = computeLabels({ body: v2Body(['kind/bug']) + ai, title: 'x', author: FORK_AUTHOR });
-    expect(withKind.add).toContain('kind/bug');
     expect(withKind.add.filter((l) => l.startsWith('kind/'))).toEqual(['kind/bug']);
     expect(withKind.add).not.toContain('delivery/skill');
-
-    // No kind box checked: the AI section must not register as a kind or a
-    // skill, and the title fallback still decides.
-    const fallback = computeLabels({ body: v2Body([]) + ai, title: 'docs: clarify setup', author: FORK_AUTHOR });
-    expect(fallback.add).toContain('kind/documentation');
-    expect(fallback.add).not.toContain('PR: Skill');
-  });
-
-  it('a filled release-note block carries no label semantics and does not confuse the kind parser', () => {
-    const note =
-      '## User and release impact\n' +
-      '- [x] User-visible change — release note below\n' +
-      '```release-note\n' +
-      'Scheduled tasks now see their scheduled time. Fixes `kind/bug` handling and - [x] `kind/feature` mentions inside prose.\n' +
-      '```\n';
-    const res = computeLabels({ body: v2Body(['kind/cleanup']) + note, title: 'x', author: FORK_AUTHOR });
-    expect(res.add.filter((l) => l.startsWith('kind/'))).toEqual(['kind/cleanup']);
-    expect(res.remove).toContain('kind/bug');
-  });
-
-  it('chore and refactor title prefixes both map to kind/cleanup', () => {
-    for (const title of ['chore(deps): bump x', 'refactor: flatten y']) {
-      const res = computeLabels({ body: v2Body([]), title, author: FORK_AUTHOR });
-      expect(res.add).toContain('kind/cleanup');
-    }
   });
 
   it('never emits a label outside the fixed vocabularies', () => {
@@ -155,8 +235,9 @@ describe('v2 bodies (nanoclaw-pr-template:v2 marker)', () => {
       'PR: Fix', 'PR: Feature', 'PR: Docs', 'PR: Refactor', 'PR: Skill',
       'delivery/skill', 'follows-guidelines', 'core-team',
     ]);
-    for (const body of [v2Body(['kind/bug'], { skill: true }), v2Body([]), v2Body(['kind/hardening'])]) {
-      for (const label of computeLabels({ body, title: 'feat!: breaking', author: 'glifocat' }).add) {
+    for (const body of [v2Body(['kind/bug'], { skill: true }), v2Body([]), v2Body(['kind/hardening'], { notSkill: true })]) {
+      const res = computeLabels({ body, title: 'feat!: breaking', author: 'glifocat' });
+      for (const label of [...res.add, ...res.remove]) {
         expect(KNOWN.has(label), label).toBe(true);
       }
     }

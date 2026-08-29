@@ -24,9 +24,14 @@ Closes #
 
 ## User and release impact
 
+<!-- Maintainers own CHANGELOG.md — do not edit it in this PR. -->
 - [ ] No user-visible behavior change
-- [ ] User-visible change; docs and changelog are updated where needed
-- [ ] Breaking change; detect / why / fix / verify / rollback migration path is included
+- [ ] User-visible change — release note below
+- [ ] Breaking change — release note below covers detect, why, fix/migration, rollback
+
+```release-note
+Optional: one user-facing line for the changelog. Skip it and a maintainer will write one.
+```
 
 ## Security and trust boundaries
 

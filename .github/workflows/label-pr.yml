@@ -80,8 +80,12 @@ jobs:
 
               if (body.includes('nanoclaw-pr-template:v2')) {
                 // ── v2: stable-token parsing + managed-kind reconcile ──
+                // Fenced code blocks (the release-note block included) are
+                // stripped before token matching, so checkbox-looking text
+                // pasted inside a fence can never register as a selection.
+                const scanned = body.replace(/```[\s\S]*?```/g, '');
                 const checked = MANAGED_KINDS.filter((kind) =>
-                  new RegExp('-\\s*\\[[xX]\\]\\s*`' + kind.replace('/', '\\/') + '`').test(body),
+                  new RegExp('-\\s*\\[[xX]\\]\\s*`' + kind.replace('/', '\\/') + '`').test(scanned),
                 );
                 let kind = checked.length === 1 ? checked[0] : undefined;
                 if (kind === undefined) {
@@ -99,7 +103,7 @@ jobs:
                   // nothing is removed — a maintainer-applied kind must survive.
                   for (const stale of MANAGED_KINDS) if (stale !== kind) remove.push(stale);
                 }
-                if (/-\s*\[[xX]\]\s*Skill:/.test(body)) {
+                if (/-\s*\[[xX]\]\s*Skill:/.test(scanned)) {
                   add.push('delivery/skill');
                   add.push('PR: Skill');
                 }

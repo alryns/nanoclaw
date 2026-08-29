@@ -130,6 +130,18 @@ describe('v2 bodies (nanoclaw-pr-template:v2 marker)', () => {
     expect(fallback.add).not.toContain('PR: Skill');
   });
 
+  it('a filled release-note block carries no label semantics and does not confuse the kind parser', () => {
+    const note =
+      '## User and release impact\n' +
+      '- [x] User-visible change — release note below\n' +
+      '```release-note\n' +
+      'Scheduled tasks now see their scheduled time. Fixes `kind/bug` handling and - [x] `kind/feature` mentions inside prose.\n' +
+      '```\n';
+    const res = computeLabels({ body: v2Body(['kind/cleanup']) + note, title: 'x', author: FORK_AUTHOR });
+    expect(res.add.filter((l) => l.startsWith('kind/'))).toEqual(['kind/cleanup']);
+    expect(res.remove).toContain('kind/bug');
+  });
+
   it('chore and refactor title prefixes both map to kind/cleanup', () => {
     for (const title of ['chore(deps): bump x', 'refactor: flatten y']) {
       const res = computeLabels({ body: v2Body([]), title, author: FORK_AUTHOR });

@@ -183,6 +183,8 @@ Test your contribution on a fresh clone before submitting. For skills, run the s
 
 Area labels (`area/*`) are applied automatically from the files your PR touches; you don't pick one.
 
+**Changelog:** `CHANGELOG.md` is maintainer-owned — don't edit it in your PR. If your change is user-visible, put one user-facing line in the template's `release-note` block; it's optional raw material that maintainers harvest at release time. Skip it and a maintainer writes the line. For a breaking change, the release note must cover detect, why, fix/migration, and rollback.
+
 ### PR description
 
 Keep it concise. Remove any template sections that don't apply. The description should cover:

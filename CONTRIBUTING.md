@@ -13,6 +13,27 @@
 
 3. **One thing per PR.** Each PR should do one thing — one bug fix, one skill, one simplification. Don't mix unrelated changes in a single PR.
 
+## Issues
+
+Open issues through the issue forms. Each form asks only for what maintainers need to act, and it applies the starting labels for you.
+
+1. **Pick the matching form.**
+
+| Form | Use it when | Labels it applies |
+|------|-------------|-------------------|
+| Bug report | Something is not working as expected | `kind/bug`, `triage/unresolved` |
+| Capability or skill request | You want NanoClaw to do something new; capabilities usually ship as skills | `kind/feature`, `delivery/skill`, `triage/unresolved` |
+| Documentation correction | A docs page is wrong, missing, or unclear | `kind/documentation`, `triage/unresolved` |
+| Security hardening | A public defense-in-depth idea that is not an exploitable vulnerability | `kind/hardening`, `triage/unresolved` |
+
+2. **Vulnerabilities are private.** If it could be exploited on a normal, correctly configured install, do not open a public issue. [Report it privately](https://github.com/nanocoai/nanoclaw/security/advisories/new). A maintainer applies `kind/security` only when disclosure is safe.
+
+3. **Questions go to [GitHub Discussions](https://github.com/nanocoai/nanoclaw/discussions).** Setup, usage, and troubleshooting questions get faster answers there than as issues.
+
+4. **Labels after you file.** The form stamps one `kind/*` label plus `triage/unresolved` (the capability form also adds `delivery/skill`); `triage/unresolved` means no maintainer has read the issue yet. A triager then applies exactly one `area/*` label; you never pick it. `priority/*` labels are maintainer-only, so there is no need to ask for one. `triage/needs-repro` means the issue is waiting on a minimal reproduction against a correctly configured deployment; posting one is the fastest way to move your issue.
+
+The full label reference and lifecycle live in the docs portal: [Issue triage](https://docs.nanoclaw.dev/concepts/triage).
+
 ## Source Code Changes
 
 **Accepted:** Bug fixes, security fixes, simplifications, reducing code.

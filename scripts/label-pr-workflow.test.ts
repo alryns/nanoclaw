@@ -219,6 +219,19 @@ describe('v2 bodies — token robustness', () => {
     expect(res.add.filter((l) => l.startsWith('kind/'))).toEqual([]);
   });
 
+  it('the Validation test-coverage checkbox carries no label semantics', () => {
+    const validation =
+      '## Validation\n' +
+      '- [x] Tests cover the changed behavior (or Validation says why not)\n';
+    const withKind = computeLabels({ body: v2Body(['kind/bug']) + validation, title: 'x', author: FORK_AUTHOR });
+    expect(withKind.add.filter((l) => l.startsWith('kind/'))).toEqual(['kind/bug']);
+    expect(withKind.add).not.toContain('delivery/skill');
+
+    // Checked with no kind box: still no verdict from it — title fallback decides.
+    const alone = computeLabels({ body: v2Body([]) + validation, title: 'docs: x', author: FORK_AUTHOR });
+    expect(alone.add).toContain('kind/documentation');
+  });
+
   it('AI-assistance checkboxes carry no label semantics and do not confuse the kind parser', () => {
     const ai =
       '## AI assistance\n' +

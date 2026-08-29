@@ -2,11 +2,25 @@
 
 <!-- Please give this PR a conventional-commit title (`fix:`, `feat:`, `docs:`,
      `refactor:`, `chore:`, `ci:`, `test:`, `build:`, `style:`, `perf:`) —
-     a request, not a requirement; it helps labeling when no kind box is checked. -->
+     a request, not a requirement; it helps labeling when no kind box is checked.
+
+     Plain English, short sentences, no filler. Write for a reviewer with 60
+     seconds — technical terms fine, decoration not. If a sentence adds no
+     reviewable fact, delete it. -->
 
 ## Summary
 
-<!-- What changed, why it matters, and the intended outcome. -->
+<!-- Shape, by example — one purpose sentence first, then bold-led bullets,
+     one fact each:
+
+       Stops the sweep killing slow local-model turns mid-decode.
+       - **Problem**: heartbeat only ticks on stream events, so silence = dead.
+       - **Fix**: poll tick vouches while the last event is under a cap.
+       - **Out of scope**: per-group config; the ceiling PR covers that.
+
+     A reviewer reading only the first sentence should know why this PR
+     exists. No prose walls; depth only some reviewers need goes in a
+     <details> appendix. -->
 
 ## Related work
 
@@ -24,7 +38,12 @@ Closes #
 
 ## Validation
 
-<!-- Exact commands and results. Add the manual path for behavior CI cannot cover. -->
+<!-- A bullet per piece of evidence: command -> result. Add the manual path
+     for behavior CI cannot cover. New or changed behavior needs a new or
+     changed test — or one line saying why not (docs-only, config-only,
+     unreachable in CI). -->
+
+- [ ] Tests cover the changed behavior (or Validation says why not)
 
 ## User and release impact
 

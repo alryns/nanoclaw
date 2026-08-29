@@ -6,15 +6,11 @@
 # a matching rule with no owner deliberately clears ownership — that is how
 # the contributor-extension paths below stay open.
 #
-# Every name here has consented to the ownership it carries. Names are added
-# by consent, never derived from activity alone. Candidate co-owners, pending
-# consent (see t67):
-#   /src/ /container/        @gavrielc  @amit-shafnir
-#   /.github/                @gavrielc
-#   /versions.json           @gavrielc  @amit-shafnir
-#   /.claude/skills reviews  @Koshkoshinsk
-# gabi-simons was removed from the previous file's rules and can rejoin any
-# rule the same way — by consent.
+# Pre-existing owners are carried over unchanged; new names are added by
+# consent, never derived from activity alone. Candidates for additional
+# coverage, pending consent (see t67):
+#   /src/ /container/ /versions.json   @amit-shafnir
+#   /.claude/skills reviews            @Koshkoshinsk
 
 # Default owner: everything not matched below routes to the active maintainer.
 * @glifocat
@@ -25,12 +21,12 @@
 /.github/ @glifocat
 
 # Runtime core
-/src/ @glifocat
-/container/ @glifocat
-/launchd/ @glifocat
+/src/ @gavrielc @gabi-simons @glifocat
+/container/ @gavrielc @gabi-simons @glifocat
+/launchd/ @gavrielc @gabi-simons @glifocat
 
 # Supply-chain pins and lockfiles (see CLAUDE.md "Supply Chain Security")
-/package.json @glifocat
+/package.json @gavrielc @gabi-simons @glifocat
 /pnpm-lock.yaml @glifocat
 /pnpm-workspace.yaml @glifocat
 /container/agent-runner/package.json @glifocat

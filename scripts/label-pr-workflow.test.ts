@@ -116,9 +116,7 @@ describe('v2 bodies (nanoclaw-pr-template:v2 marker)', () => {
   it('AI-assistance checkboxes carry no label semantics and do not confuse the kind parser', () => {
     const ai =
       '## AI assistance\n' +
-      '- [ ] No AI assistance\n' +
-      '- [ ] AI-assisted: a person wrote this with AI help\n' +
-      '- [x] Agent-authored: an AI agent wrote this\n' +
+      '- [x] AI tools or agents helped produce this change\n' +
       '- [x] A human has reviewed this PR and stands behind every change\n';
     const withKind = computeLabels({ body: v2Body(['kind/bug']) + ai, title: 'x', author: FORK_AUTHOR });
     expect(withKind.add).toContain('kind/bug');

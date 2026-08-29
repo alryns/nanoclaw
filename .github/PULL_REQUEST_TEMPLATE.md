@@ -39,10 +39,7 @@ Closes #
 
 ## AI assistance
 
-<!-- Check exactly one. -->
-- [ ] No AI assistance
-- [ ] AI-assisted: a person wrote this with AI help
-- [ ] Agent-authored: an AI agent wrote this
+- [ ] AI tools or agents helped produce this change
 
-<!-- Required when either AI box above is checked. -->
+<!-- Required. -->
 - [ ] A human has reviewed this PR and stands behind every change

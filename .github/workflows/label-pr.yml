@@ -5,46 +5,129 @@ name: Label PR
 # Keep it metadata-only — do NOT add actions/checkout or any step that
 # executes PR-supplied content (install scripts, build commands, etc.).
 # See https://securitylab.github.com/resources/github-actions-preventing-pwn-requests/
+#
+# The labeling logic lives inline between the NANOCLAW-LABEL-LOGIC markers as a
+# pure function; scripts/label-pr-workflow.test.ts extracts that exact block
+# from this file and runs fixture tests against it, so the tested code and the
+# shipped code cannot drift. Edit the function only between the markers.
 on:
   pull_request_target:
-    types: [opened, edited]
+    types: [opened, edited, reopened, ready_for_review]
 
 jobs:
   label:
     runs-on: ubuntu-latest
     permissions:
       pull-requests: write
-      issues: write # createLabel — auto-provisions the core-team label
+      issues: write # createLabel — auto-provisions the core-team label (v1-era behavior, kept until Decision 4)
     steps:
-      - uses: actions/github-script@v7
+      - uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
         with:
           script: |
-            const body = context.payload.pull_request.body || '';
-            const labels = [];
-
-            // Every string pushed below must byte-match an existing repo label
-            // (`gh label list`). addLabels auto-creates unknown names with a
-            // random color and no description, so a typo invents a label.
+            // NANOCLAW-LABEL-LOGIC-START
+            // Pure decision function. No API calls, no environment reads — the
+            // driver below feeds it payload fields and applies the result.
             //
-            // Each branch emits both vocabularies: the legacy `PR: *` label the
-            // triage reconciler still reads, and its `kind/*` (+ `delivery/*`)
-            // equivalent in the current taxonomy. Retiring `PR: *` is a separate
-            // decision; until then both must stay in sync.
+            // Every label string emitted here must byte-match a label that
+            // already exists in the repo (`gh label list`): addLabels
+            // auto-creates unknown names with a random color and no
+            // description, so a typo silently invents a label. Never push a
+            // name that is not in the fixed vocabularies below.
+            //
+            // Two body contracts, selected by marker:
+            //   v2 (`nanoclaw-pr-template:v2`): stable-token parsing — exactly
+            //     one managed `kind/*` checkbox; a conventional-commit title
+            //     prefix is the fallback when zero or several boxes are
+            //     checked; still ambiguous → apply no kind and leave the PR
+            //     for triage (never guess). The managed kind set is
+            //     reconciled: stale managed kinds are removed before the
+            //     current one is added.
+            //   v1 (`contributing-guide: v1`, or no marker): the pre-v2
+            //     behavior, byte-frozen — visible-substring checkbox matching,
+            //     add-only, emitting both the legacy `PR: *` vocabulary and
+            //     its `kind/*` equivalent.
+            // Both paths keep emitting `PR: *` and `follows-guidelines` until
+            // Decision 4 retires them.
+            function computeLabels({ body, title, author }) {
+              body = body || '';
+              title = title || '';
+              const add = [];
+              const remove = [];
 
-            if (body.includes('[x] **Feature skill**'))       { labels.push('PR: Skill'); labels.push('PR: Feature'); labels.push('kind/feature'); labels.push('delivery/skill'); }
-            else if (body.includes('[x] **Utility skill**'))   { labels.push('PR: Skill'); labels.push('kind/feature'); labels.push('delivery/skill'); }
-            else if (body.includes('[x] **Operational/container skill**')) { labels.push('PR: Skill'); labels.push('kind/feature'); labels.push('delivery/skill'); }
-            else if (body.includes('[x] **Fix**'))             { labels.push('PR: Fix'); labels.push('kind/bug'); }
-            else if (body.includes('[x] **Simplification**'))  { labels.push('PR: Refactor'); labels.push('kind/cleanup'); }
-            else if (body.includes('[x] **Documentation**'))   { labels.push('PR: Docs'); labels.push('kind/documentation'); }
+              const MANAGED_KINDS = ['kind/bug', 'kind/feature', 'kind/documentation', 'kind/cleanup', 'kind/hardening'];
+              // Legacy vocabulary kept in lockstep until Decision 4. Hardening
+              // has no PR:* equivalent, so none is emitted rather than
+              // guessing one.
+              const KIND_TO_LEGACY = {
+                'kind/bug': 'PR: Fix',
+                'kind/feature': 'PR: Feature',
+                'kind/documentation': 'PR: Docs',
+                'kind/cleanup': 'PR: Refactor',
+                'kind/hardening': null,
+              };
+              const TITLE_PREFIX_TO_KIND = {
+                fix: 'kind/bug',
+                feat: 'kind/feature',
+                docs: 'kind/documentation',
+                refactor: 'kind/cleanup',
+                chore: 'kind/cleanup',
+              };
 
-            if (body.includes('contributing-guide: v1')) labels.push('follows-guidelines');
+              // Lowercase GitHub logins; keep in sync with the core team roster.
+              const CORE_TEAM = ['gavrielc', 'koshkoshinsk', 'glifocat', 'gabi-simons', 'omri-maya', 'amit-shafnir', 'moshe-nanoco', 'zvi-fried'];
+              const coreTeam = CORE_TEAM.includes((author || '').toLowerCase());
+              if (coreTeam) add.push('core-team');
 
-            // Lowercase GitHub logins; keep in sync with the core team roster.
-            const CORE_TEAM = ['gavrielc', 'koshkoshinsk', 'glifocat', 'gabi-simons', 'omri-maya', 'amit-shafnir', 'moshe-nanoco', 'zvi-fried'];
-            const author = context.payload.pull_request.user.login.toLowerCase();
-            if (CORE_TEAM.includes(author)) {
-              labels.push('core-team');
+              if (body.includes('nanoclaw-pr-template:v2')) {
+                // ── v2: stable-token parsing + managed-kind reconcile ──
+                const checked = MANAGED_KINDS.filter((kind) =>
+                  new RegExp('-\\s*\\[[xX]\\]\\s*`' + kind.replace('/', '\\/') + '`').test(body),
+                );
+                let kind = checked.length === 1 ? checked[0] : undefined;
+                if (kind === undefined) {
+                  // Zero or several boxes: fall back to the conventional-commit
+                  // title prefix; if that is ambiguous too, apply nothing.
+                  const m = /^([a-z]+)(\([^)]*\))?!?:/.exec(title.trim());
+                  if (m && TITLE_PREFIX_TO_KIND[m[1]]) kind = TITLE_PREFIX_TO_KIND[m[1]];
+                }
+                if (kind !== undefined) {
+                  add.push(kind);
+                  if (KIND_TO_LEGACY[kind]) add.push(KIND_TO_LEGACY[kind]);
+                  // Reconcile only what this parser owns, and only when it
+                  // reached a verdict: stale managed kinds are removed so an
+                  // edited selection does not accumulate. With no verdict,
+                  // nothing is removed — a maintainer-applied kind must survive.
+                  for (const stale of MANAGED_KINDS) if (stale !== kind) remove.push(stale);
+                }
+                if (/-\s*\[[xX]\]\s*Skill:/.test(body)) {
+                  add.push('delivery/skill');
+                  add.push('PR: Skill');
+                }
+                add.push('follows-guidelines');
+              } else {
+                // ── v1: pre-v2 behavior, byte-frozen (add-only) ──
+                if (body.includes('[x] **Feature skill**'))       { add.push('PR: Skill'); add.push('PR: Feature'); add.push('kind/feature'); add.push('delivery/skill'); }
+                else if (body.includes('[x] **Utility skill**'))   { add.push('PR: Skill'); add.push('kind/feature'); add.push('delivery/skill'); }
+                else if (body.includes('[x] **Operational/container skill**')) { add.push('PR: Skill'); add.push('kind/feature'); add.push('delivery/skill'); }
+                else if (body.includes('[x] **Fix**'))             { add.push('PR: Fix'); add.push('kind/bug'); }
+                else if (body.includes('[x] **Simplification**'))  { add.push('PR: Refactor'); add.push('kind/cleanup'); }
+                else if (body.includes('[x] **Documentation**'))   { add.push('PR: Docs'); add.push('kind/documentation'); }
+
+                if (body.includes('contributing-guide: v1')) add.push('follows-guidelines');
+              }
+
+              return { add, remove, coreTeam };
+            }
+            // NANOCLAW-LABEL-LOGIC-END
+
+            const pr = context.payload.pull_request;
+            const { add, remove, coreTeam } = computeLabels({
+              body: pr.body,
+              title: pr.title,
+              author: pr.user.login,
+            });
+
+            if (coreTeam) {
               try {
                 await github.rest.issues.createLabel({
                   owner: context.repo.owner,
@@ -58,11 +141,28 @@ jobs:
               }
             }
 
-            if (labels.length > 0) {
+            // Removals first, and only of labels actually on the PR, so an
+            // edited kind selection swaps cleanly instead of accumulating.
+            const current = new Set((pr.labels || []).map((l) => l.name));
+            for (const name of remove) {
+              if (!current.has(name)) continue;
+              try {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: pr.number,
+                  name,
+                });
+              } catch (e) {
+                if (e.status !== 404) throw e; // 404: already gone
+              }
+            }
+
+            if (add.length > 0) {
               await github.rest.issues.addLabels({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
-                issue_number: context.payload.pull_request.number,
-                labels,
+                issue_number: pr.number,
+                labels: add,
               });
             }

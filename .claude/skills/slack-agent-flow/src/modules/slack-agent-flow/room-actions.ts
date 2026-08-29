@@ -267,9 +267,9 @@ export async function handleCreateRoom(content: Record<string, unknown>, session
       await notifyAgent(
         session,
         `Room "${name}" is live (${roomChannelId}) with you, the operator, and ${memberNames}. ` +
-          `No agent was engaged automatically. If a response is wanted now, post a brief introduction with ` +
-          `handoff({ room: "${roomDest}", to: ["agent-name"], text: "..." }), listing exactly the agent or ` +
-          `agents the user wants to respond. One or several names are both valid; never write raw Slack mentions.`,
+          `No agent was engaged automatically. Use ` +
+          `handoff({ room: "${roomDest}", to: ["agent-name"], text: "..." }) to choose who responds; ` +
+          `never write raw Slack mentions.`,
       );
     }
     log.info('create_room completed', { roomChannelId, created, participantCount: participants.length });
@@ -303,7 +303,7 @@ async function resolveHandoffRoom(
   if (room.channel_type !== 'slack' || room.is_group !== 1) {
     throw new RoomActionError(
       `handoff needs a shared Slack surface ("${room.name ?? room.platform_id}" is not one); ` +
-        'use send_message for private A2A, or pass an explicit room destination',
+        'use send_message for private A2A or pass an explicit room destination',
     );
   }
   if (room.denied_at || room.detached_at) {
@@ -362,8 +362,7 @@ export async function handleHandoff(content: Record<string, unknown>, session: S
       if (!targetRoom) {
         throw new RoomActionError(
           `agent "${group.name}" is not wired to room "${room.name ?? room.platform_id}"; ` +
-            'use send_message for private A2A and relay the result, or add/invite the agent before handing off ' +
-            'if the user needs a visible reply there',
+            'use send_message to relay privately or add/invite the agent before handing off',
         );
       }
       recipients.push(await participantForInstance(group, targetRoom.instance ?? 'slack', process.cwd()));

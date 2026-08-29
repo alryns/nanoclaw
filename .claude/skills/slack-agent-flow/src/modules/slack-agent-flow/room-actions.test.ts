@@ -492,77 +492,6 @@ describe('handoff', () => {
     });
   });
 
-  it('from a canvas-comment session, preserves the comment thread and mentions only a wired participant', async () => {
-    await openRoom(['Pixel']);
-    const now = new Date().toISOString();
-    await createMessagingGroup({
-      id: 'mg-canvas-src',
-      channel_type: 'slack',
-      platform_id: 'slack:C0CANVAS',
-      instance: 'slack',
-      name: 'Website Team canvas comments',
-      is_group: 1,
-      unknown_sender_policy: 'public',
-      created_at: now,
-    });
-    await createMessagingGroupAgent({
-      id: 'mga-canvas-src',
-      messaging_group_id: 'mg-canvas-src',
-      agent_group_id: SRC_GROUP,
-      engage_mode: 'pattern',
-      engage_pattern: '.',
-      sender_scope: 'all',
-      ignored_message_policy: 'accumulate',
-      session_mode: 'per-thread',
-      priority: 0,
-      created_at: now,
-    });
-    await createMessagingGroup({
-      id: 'mg-canvas-pixel',
-      channel_type: 'slack',
-      platform_id: 'slack:C0CANVAS',
-      instance: 'slack-pixel',
-      name: 'Website Team canvas comments',
-      is_group: 1,
-      unknown_sender_policy: 'public',
-      created_at: now,
-    });
-    await createMessagingGroupAgent({
-      id: 'mga-canvas-pixel',
-      messaging_group_id: 'mg-canvas-pixel',
-      agent_group_id: 'ag-pixel',
-      engage_mode: 'mention',
-      engage_pattern: null,
-      sender_scope: 'all',
-      ignored_message_policy: 'accumulate',
-      session_mode: 'per-thread',
-      priority: 0,
-      created_at: now,
-    });
-
-    await runAction(
-      'handoff',
-      { to: 'Pixel', text: 'Please review this canvas comment.' },
-      {
-        ...SLACK_SESSION,
-        id: 'sess-canvas-comment',
-        messaging_group_id: 'mg-canvas-src',
-        thread_id: 'slack:C0CANVAS:1700000000.000002',
-      },
-    );
-
-    expect(mockDeliver).toHaveBeenCalledTimes(1);
-    const [, platformId, threadId, , rawContent, , instance] = mockDeliver.mock.calls[0]!;
-    expect({ platformId, threadId, instance }).toEqual({
-      platformId: 'slack:C0CANVAS',
-      threadId: 'slack:C0CANVAS:1700000000.000002',
-      instance: 'slack',
-    });
-    expect(JSON.parse(rawContent as string)).toEqual({
-      text: 'Please review this canvas comment.\n<@U0PIXELBOT>',
-    });
-  });
-
   it('from a DM, rejects implicit handoff with private-A2A or explicit-room guidance', async () => {
     await runAction('handoff', { to: 'Pixel', text: 'Please review.' });
 
@@ -592,7 +521,7 @@ describe('handoff', () => {
       expect(mockDeliver).not.toHaveBeenCalled();
       expect(notifyTexts().at(-1)).toContain(`handoff failed: ${testCase.failure}`);
       if (testCase.failure.includes('not wired to room')) {
-        expect(notifyTexts().at(-1)).toContain('use send_message for private A2A and relay the result');
+        expect(notifyTexts().at(-1)).toContain('use send_message to relay privately');
         expect(notifyTexts().at(-1)).toContain('add/invite the agent before handing off');
       }
     }

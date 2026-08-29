@@ -100,11 +100,9 @@ describe('add_to_room', () => {
 
 describe('handoff', () => {
   it('describes natural shared-surface intent and keeps private A2A on send_message', () => {
-    expect(handoff.tool.description).toContain('even when they say "ask" rather than "handoff"');
-    expect(handoff.tool.description).toContain('channels, group DMs, and canvas-comment threads');
-    expect(handoff.tool.description).toContain('Omit room to preserve the current thread');
-    expect(sendMessage.tool.description).toContain('use direct A2A only for private or cross-surface coordination');
-    expect(sendMessage.tool.description).toContain('use handoff instead');
+    expect(handoff.tool.description).toContain('even if they say "ask"');
+    expect(handoff.tool.description).toContain('use send_message for private or cross-surface A2A');
+    expect(sendMessage.tool.description).toContain('use handoff when an agent should respond visibly');
   });
 
   it('accepts one target or several and writes explicit recipient lists', async () => {

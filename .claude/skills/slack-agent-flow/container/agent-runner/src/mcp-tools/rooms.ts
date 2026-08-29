@@ -1,18 +1,8 @@
 /**
  * Slack room MCP tools: create_room, add_to_room, handoff.
  *
- * A "room" is one Slack group conversation shared by the user and N agents.
- * create_room is the team primitive — the multi-agent pattern is N
- * create_agent calls with room:'none', then ONE create_room naming all of
- * them. The management tools are fire-and-forget (create_agent pattern):
- * they write an outbound system row and return; the host resolves names,
- * opens the conversation, wires everyone, and reports back as a system note.
- * handoff uses the same system-action path to resolve real bot mentions and
- * deliver through the caller's room adapter/thread.
- *
- * Authorization is host-side: create_room/add_to_room use the create_agent
- * guard split; handoff needs no approval but re-validates destinations,
- * same-room wiring, and content because the container is untrusted.
+ * Each writes an outbound system action for the trusted host to validate and
+ * execute. The container performs argument validation only.
  *
  * This module also extends the base `create_agent` tool (see the extendTool
  * call at the bottom): the Slack flow adds `purpose` / `allow_guests` /
@@ -131,7 +121,7 @@ export const handoff: McpToolDefinition = {
   tool: {
     name: 'handoff',
     description:
-      'Post one visible message that reliably engages exactly the named sibling agent(s) on a shared Slack surface. Use this whenever the user asks room members to reply, speak, answer, or work there, even when they say "ask" rather than "handoff". Shared surfaces include channels, group DMs, and canvas-comment threads. Omit room to preserve the current thread; from a DM or another session, pass room only when the user wants the response in that named room. Use send_message instead for private/cross-surface A2A or an agent outside the shared surface. Never write raw <@...> mentions yourself. Fire-and-forget: host-side validation rejects self, unknown agents, agents outside the room, duplicates, and embedded Slack mentions.',
+      'Post one visible Slack message that engages exactly the named sibling agent(s). Use when the user wants room members to respond there, even if they say "ask"; use send_message for private or cross-surface A2A. Omit room on the current shared surface to preserve its thread, or pass a named room from another session. Never write raw <@...> mentions yourself.',
     inputSchema: {
       type: 'object' as const,
       properties: {
@@ -179,12 +169,9 @@ export const handoff: McpToolDefinition = {
 
 registerTools([createRoom, addToRoom, handoff]);
 
-// Keep the channel-neutral send_message tool generic at its source, but make
-// the Slack construct's private-A2A versus shared-surface boundary visible at
-// tool-selection time. The barrel registers core.ts before this module.
 extendTool('send_message', {
   descriptionSuffix:
-    'For agent-type destinations in a Slack construct, use direct A2A only for private or cross-surface coordination: ordinary requests from a DM, explicitly private work, or an agent outside the shared surface. When the user wants a member to reply, speak, answer, or work in a shared Slack channel, group DM, or canvas-comment thread, use handoff instead, even when they only say "ask". From a DM, use handoff with room only when the user names the shared room where the response should appear.',
+    'In a Slack construct, use handoff when an agent should respond visibly on a shared surface; use send_message for private or cross-surface A2A.',
 });
 
 // ── create_agent extension (Slack agent flow) ──

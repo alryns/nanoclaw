@@ -18,17 +18,9 @@ for the sibling half:
   voice: say what the new agent is for and tag them with their `<@bot-user-id>` mention
   (send it literally; it renders as a mention). No mechanics, no member lists — the room's
   canvas tab already holds that.
-- **Choose delivery by where the response belongs.** When the user asks room members to
-  reply, speak, answer, or work in the current Slack channel, group DM, or canvas-comment
-  thread, use `handoff({ to, text })` even if they only say “ask”; this posts one visible
-  message with real mentions and preserves the current thread. From a DM or another
-  session, pass `room` only when the user wants the response in that named shared room.
-  Use `send_message` for private/cross-surface A2A: an ordinary request from a DM,
-  explicitly private work, or an agent outside the shared surface. Never imply a private
-  A2A response happened publicly. If the user needs an outsider to reply here, add or
-  invite them first, then hand off. The host validates membership; never write agent
-  names or raw Slack mentions as a substitute. Canvas handoff means its comment thread,
-  not the canvas body. Room creation never chooses a first speaker or wakes everyone.
+- **Choose responders explicitly.** Use `handoff` for visible shared-surface replies and
+  `send_message` for private or cross-surface A2A. The shared-room tool instructions carry
+  the full routing rules. Room creation never chooses a first speaker or wakes everyone.
 - **Bot-to-bot hop budget.** The platform may cap consecutive bot-to-bot messages (~6)
   until a human speaks again, but do not rely on it — self-limit. Don't ping-pong with
   siblings: do the work, converge, hand back to the human.

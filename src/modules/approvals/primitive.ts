@@ -221,18 +221,21 @@ export interface RequestApprovalOptions {
 }
 
 /**
- * Queue an approval request. Picks an approver, delivers the card to their
- * DM, and records the pending_approvals row. Fire-and-forget from the
- * caller's perspective — the admin's response kicks off the registered
- * approval handler for this action via the response dispatcher.
+ * Queue an approval request. The admin's response later kicks off the
+ * registered approval handler via the response dispatcher.
  */
 export async function requestApproval(opts: RequestApprovalOptions): Promise<void> {
+  await requestApprovalResult(opts);
+}
+
+/** Same request, reporting whether a durable approval row remains queued. */
+export async function requestApprovalResult(opts: RequestApprovalOptions): Promise<boolean> {
   const { session, action, payload, title, question, agentName, approverUserId } = opts;
 
   const approvers = approverUserId ? [approverUserId] : await pickApprover(session.agent_group_id);
   if (approvers.length === 0) {
     await notifyAgent(session, `${action} failed: no owner or admin configured to approve.`);
-    return;
+    return false;
   }
 
   const origin = session.messaging_group_id ? await getMessagingGroup(session.messaging_group_id) : undefined;
@@ -241,7 +244,7 @@ export async function requestApproval(opts: RequestApprovalOptions): Promise<voi
   const target = await pickApprovalDelivery(approvers, originChannelType, origin?.instance);
   if (!target) {
     await notifyAgent(session, `${action} failed: no DM channel found for any eligible approver.`);
-    return;
+    return false;
   }
 
   const approvalId = `appr-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -288,9 +291,10 @@ export async function requestApproval(opts: RequestApprovalOptions): Promise<voi
       // can't linger as a pending approval nobody can act on.
       await deletePendingApproval(approvalId);
       await notifyAgent(session, `${action} failed: could not deliver approval request to ${target.userId}.`);
-      return;
+      return false;
     }
   }
 
   log.info('Approval requested', { action, approvalId, agentName, approver: target.userId });
+  return true;
 }

@@ -24,7 +24,7 @@ import type { Session } from '../../types.js';
 import { upsertUser } from '../permissions/db/users.js';
 import { upsertUserDm } from '../permissions/db/user-dms.js';
 import { grantRole } from '../permissions/db/user-roles.js';
-import { requestApproval } from './primitive.js';
+import { requestApprovalResult } from './primitive.js';
 
 vi.mock('../../container-runner.js', () => ({
   wakeContainer: vi.fn().mockResolvedValue(undefined),
@@ -119,7 +119,7 @@ describe('requestApproval delivery failure', () => {
     };
     setDeliveryAdapter(failingAdapter);
 
-    await requestApproval({
+    const queued = await requestApprovalResult({
       session,
       agentName: 'Agent',
       action: 'test_action',
@@ -130,6 +130,7 @@ describe('requestApproval delivery failure', () => {
 
     // No orphan: the row created before the delivery attempt is gone.
     expect(await getPendingApprovalsByAction('test_action')).toHaveLength(0);
+    expect(queued).toBe(false);
     expect(lastNotifyText()).toMatch(/test_action failed: could not deliver/);
   });
 
@@ -141,7 +142,7 @@ describe('requestApproval delivery failure', () => {
     };
     setDeliveryAdapter(okAdapter);
 
-    await requestApproval({
+    const queued = await requestApprovalResult({
       session,
       agentName: 'Agent',
       action: 'test_action',
@@ -151,6 +152,7 @@ describe('requestApproval delivery failure', () => {
     });
 
     expect(await getPendingApprovalsByAction('test_action')).toHaveLength(1);
+    expect(queued).toBe(true);
     expect(vi.mocked(writeSessionMessage)).not.toHaveBeenCalled();
   });
 });

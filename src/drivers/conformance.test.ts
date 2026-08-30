@@ -146,6 +146,8 @@ describe('conformance: spec realization fidelity', () => {
 
     expect(agent.mounts).toEqual([
       { hostPath: '/install/data/v2-sessions/g1/s1', containerPath: '/workspace', ro: false },
+      { hostPath: '/mailbox/agent-groups/g1/sessions/s1/inbox', containerPath: '/workspace/inbox', ro: true },
+      { hostPath: '/mailbox/agent-groups/g1/sessions/s1/outbox', containerPath: '/workspace/outbox', ro: false },
       { hostPath: '/install/container/agent-runner/src', containerPath: '/app/src', ro: true },
       { hostPath: '/install/container/CLAUDE.md', containerPath: '/app/CLAUDE.md', ro: true },
     ]);
@@ -344,6 +346,41 @@ describe('conformance: the isolation-tier rule (validateSpec is the shared layer
 });
 
 describe('conformance: admission judges the path the runtime mounts', () => {
+  eachDriver('accepts mailbox-selected attachment roots outside the SQLite session tree', async (h) => {
+    await expect(h.driver.prepare(fixtureSpec())).resolves.toBeDefined();
+  });
+
+  eachDriver('requires the exact scoped inbox/outbox attachment pair on the agent only', async (h) => {
+    const missingInbox = fixtureSpec();
+    missingInbox.containers[0].mounts = missingInbox.containers[0].mounts.filter(
+      (mount) => mount.containerPath !== '/workspace/inbox',
+    );
+    await expect(h.driver.prepare(missingInbox)).rejects.toMatchObject({ kind: 'denied-by-policy' });
+
+    const writableInbox = fixtureSpec();
+    writableInbox.containers[0].mounts.find((mount) => mount.containerPath === '/workspace/inbox')!.mode = 'rw';
+    await expect(h.driver.prepare(writableInbox)).rejects.toMatchObject({ kind: 'denied-by-policy' });
+
+    const wrongGroup = fixtureSpec();
+    wrongGroup.containers[0].mounts.find((mount) => mount.containerPath === '/workspace/outbox')!.groupScope = 'g2';
+    await expect(h.driver.prepare(wrongGroup)).rejects.toMatchObject({ kind: 'denied-by-policy' });
+
+    const overlapping = fixtureSpec();
+    overlapping.containers[0].mounts.find((mount) => mount.containerPath === '/workspace/outbox')!.hostPath =
+      '/mailbox/agent-groups/g1/sessions/s1/inbox/nested';
+    await expect(h.driver.prepare(overlapping)).rejects.toMatchObject({ kind: 'denied-by-policy' });
+
+    const auxiliary = fixtureSpecWithAux();
+    auxiliary.containers[1].mounts.push({
+      class: 'mailbox-attachment',
+      hostPath: '/mailbox/agent-groups/g1/sessions/s1/inbox',
+      containerPath: '/workspace/inbox',
+      mode: 'ro',
+      groupScope: 'g1',
+    });
+    await expect(h.driver.prepare(auxiliary)).rejects.toMatchObject({ kind: 'denied-by-policy' });
+  });
+
   eachDriver('refuses a mount whose path escapes its root lexically', async (h) => {
     const spec = fixtureSpec();
     spec.containers[0].mounts.push({

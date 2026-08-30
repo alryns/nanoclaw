@@ -13,16 +13,21 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { initTestDb, closeDb, runMigrations } from '../../db/index.js';
 import { createAgentGroup } from '../../db/agent-groups.js';
-import { createSession, createPendingApproval } from '../../db/sessions.js';
+import { createSession, createPendingApproval, getPendingApproval } from '../../db/sessions.js';
 import { upsertUser } from '../permissions/db/users.js';
 import { grantRole } from '../permissions/db/user-roles.js';
-import { initSessionFolder } from '../../session-manager.js';
+import { initSessionFolder, writeSessionMessage } from '../../session-manager.js';
 import { handleApprovalsResponse } from './response-handler.js';
 import { registerApprovalHandler, registerApprovalResolvedHandler, type ApprovalResolvedEvent } from './primitive.js';
 
 vi.mock('../../container-runner.js', () => ({
   wakeContainer: vi.fn().mockResolvedValue(undefined),
 }));
+
+vi.mock('../../session-manager.js', async (importActual) => {
+  const actual = await importActual<typeof import('../../session-manager.js')>();
+  return { ...actual, writeSessionMessage: vi.fn(actual.writeSessionMessage) };
+});
 
 vi.mock('../../config.js', async () => {
   const actual = await vi.importActual('../../config.js');
@@ -108,6 +113,29 @@ describe('approval-resolved callbacks', () => {
     expect(events[0].approval.action).toBe('test_reject_action');
     expect(events[0].session.id).toBe('sess-1');
     expect(events[0].userId).toBe('slack:admin-1');
+  });
+
+  it('finalizes rejection callbacks and deletes the row even when agent notification fails', async () => {
+    const events: ApprovalResolvedEvent[] = [];
+    registerApprovalResolvedHandler((event) => {
+      events.push(event);
+    });
+    vi.mocked(writeSessionMessage).mockRejectedValueOnce(new Error('mailbox unavailable'));
+    await seedApproval('appr-reject-notify-fail', 'test_reject_action');
+
+    await expect(
+      handleApprovalsResponse({
+        questionId: 'appr-reject-notify-fail',
+        value: 'reject',
+        userId: 'slack:admin-1',
+        channelType: 'slack',
+        platformId: 'slack:C1',
+        threadId: null,
+      }),
+    ).rejects.toThrow('mailbox unavailable');
+
+    expect(events.at(-1)?.outcome).toBe('reject');
+    expect(await getPendingApproval('appr-reject-notify-fail')).toBeUndefined();
   });
 
   it('fires registered callbacks on approve after the action handler ran', async () => {

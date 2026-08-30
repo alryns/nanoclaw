@@ -35,6 +35,7 @@ import type { ContainerConfig } from './container-config.js';
 import { buildMounts, toMountSpecs } from './container-runner.js';
 import { mountPolicy } from './drivers/index.js';
 import { GROUP_FOLDER_LABEL, validateSpec, type SessionSpec } from './drivers/types.js';
+import { getAgentMailbox } from './mailbox/index.js';
 import type { AgentGroup, Session } from './types.js';
 
 const GROUP_ID = 'ag-mount-composition';
@@ -103,6 +104,26 @@ describe('buildMounts against the policy the drivers enforce', () => {
         '/app/src',
       ]),
     );
+  });
+
+  it('mounts the inbox read-only and the outbox writable', async () => {
+    const byPath = new Map((await composedMounts()).map((mount) => [mount.containerPath, mount]));
+    expect(byPath.get('/workspace/inbox')?.readonly).toBe(true);
+    expect(byPath.get('/workspace/outbox')?.readonly).toBe(false);
+  });
+
+  it('accepts mailbox-selected attachment roots outside the SQLite session tree', async () => {
+    const root = path.join(DATA_DIR, 'external-mailbox-attachments', GROUP_ID, SESSION_ID);
+    const selected = vi.spyOn(getAgentMailbox(), 'attachmentMounts').mockResolvedValue({
+      inboxHostPath: path.join(root, 'inbox'),
+      outboxHostPath: path.join(root, 'outbox'),
+    });
+    try {
+      const spec = specFrom(await composedMounts());
+      expect(() => validateSpec(spec, mountPolicy())).not.toThrow();
+    } finally {
+      selected.mockRestore();
+    }
   });
 
   it('classes every mount for a root it actually lives under', async () => {

@@ -49,10 +49,12 @@ const {
 
 vi.mock('../approvals/index.js', () => ({
   requestApproval: (...a: unknown[]) => mockRequestApproval(...a),
+  requestApprovalResult: vi.fn().mockResolvedValue(true),
   notifyAgent: vi.fn(),
   registerApprovalHandler: (action: string, handler: (ctx: Record<string, unknown>) => Promise<void>) => {
     approvalHandlers.set(action, handler);
   },
+  registerApprovalResolvedHandler: vi.fn(),
 }));
 vi.mock('../../db/container-configs.js', () => ({
   getContainerConfig: (...a: unknown[]) => mockGetContainerConfig(...a),

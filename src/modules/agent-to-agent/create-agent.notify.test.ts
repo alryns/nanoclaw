@@ -20,8 +20,10 @@ const { mockNotifyWrite, destinations } = vi.hoisted(() => ({
 
 vi.mock('../approvals/index.js', () => ({
   requestApproval: vi.fn().mockResolvedValue(undefined),
+  requestApprovalResult: vi.fn().mockResolvedValue(true),
   notifyAgent: vi.fn(),
   registerApprovalHandler: vi.fn(),
+  registerApprovalResolvedHandler: vi.fn(),
 }));
 vi.mock('../../db/container-configs.js', () => ({
   getContainerConfig: () => ({ cli_scope: 'global' }),

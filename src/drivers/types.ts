@@ -24,7 +24,12 @@ export interface SessionKey {
  */
 export type ContainerRole = string;
 
-export type MountClass = 'group-state' | 'install-surface' | 'identity-material' | 'allowlisted-extra';
+export type MountClass =
+  | 'group-state'
+  | 'mailbox-attachment'
+  | 'install-surface'
+  | 'identity-material'
+  | 'allowlisted-extra';
 
 export interface MountSpec {
   /**
@@ -33,6 +38,9 @@ export interface MountSpec {
    *   folder, provider state — the path carries provider specifics; the seam is
    *   provider-agnostic). Usually rw; read-only views over group paths (composed
    *   instructions, per-group config) use this class with mode 'ro'.
+   * - 'mailbox-attachment': exact inbox/outbox paths selected by the registered
+   *   mailbox implementation. Only the agent's canonical inbox (ro) and outbox
+   *   (rw) targets may use it, and both remain scoped to the session's group.
    * - 'install-surface': shipped runtime surfaces from the release (runner source,
    *   skills, shared instructions). Pinned to an enumerated surfaceRoots allowlist —
    *   never a bare install-root prefix, since state roots may nest inside it; mode
@@ -427,6 +435,24 @@ export function validateSpec(spec: SessionSpec, policy: MountPolicy, capabilitie
   const pluginsRoot = stampedPluginsRoot(spec, policy);
   for (const container of spec.containers) {
     const seenTargets = new Set<string>();
+    const attachmentMounts = container.mounts.filter((mount) => mount.class === 'mailbox-attachment');
+    if (container.role !== 'agent' && attachmentMounts.length > 0) {
+      throw deniedByPolicy(`mailbox-attachment mounts are invalid on role ${container.role}`);
+    }
+    if (container.role === 'agent') {
+      const inbox = attachmentMounts.filter(
+        (mount) => mount.containerPath === '/workspace/inbox' && mount.mode === 'ro',
+      );
+      const outbox = attachmentMounts.filter(
+        (mount) => mount.containerPath === '/workspace/outbox' && mount.mode === 'rw',
+      );
+      if (attachmentMounts.length !== 2 || inbox.length !== 1 || outbox.length !== 1) {
+        throw deniedByPolicy('agent must have exactly one mailbox-attachment inbox (ro) and outbox (rw) mount');
+      }
+      if (underRoot(inbox[0]!.hostPath, outbox[0]!.hostPath) || underRoot(outbox[0]!.hostPath, inbox[0]!.hostPath)) {
+        throw deniedByPolicy('mailbox-attachment inbox and outbox host paths must not overlap');
+      }
+    }
     for (const mount of container.mounts) {
       if (!hostPathCanonical(mount.hostPath)) {
         // Every class rule below is a prefix check against a trusted root, and
@@ -454,8 +480,8 @@ export function validateSpec(spec: SessionSpec, policy: MountPolicy, capabilitie
       if (required && mount.class !== required) {
         // Where a file lives decides what it IS, so the class is not the
         // composer's to choose for these roots. Without this the taxonomy is
-        // only as strong as whoever assigns the class, and two of the four
-        // classes carry safety properties that a demotion silently drops:
+        // only as strong as whoever assigns the class, and these classes carry
+        // safety properties that a demotion silently drops:
         // `allowlisted-extra` is permitted unconditionally, so relabelling a
         // session private key as one mounts it INTO THE AGENT — defeating the
         // no-credentials invariant outright — and relabelling the runner source
@@ -555,7 +581,7 @@ export function looksLikeCredential(value: string): boolean {
 /**
  * The class a path is not allowed to disagree with.
  *
- * Only the two roots whose classes carry a safety property are pinned this way.
+ * Only roots whose classes carry a path-derived safety property are pinned this way.
  * `group-state` and `allowlisted-extra` stay a composition choice, because
  * `allowlisted-extra` legitimately covers operator-configured read-write mounts
  * and forcing those read-only would break the mount-allowlist feature. The rule
@@ -613,6 +639,10 @@ function mountAllowed(mount: MountSpec, spec: SessionSpec, policy: MountPolicy):
     }
     case 'identity-material':
       return underRoot(mount.hostPath, policy.materialsRoot);
+    case 'mailbox-attachment':
+      // The registered mailbox is the trusted source of these exact paths;
+      // the checks above pin their agent role, targets and modes.
+      return mount.groupScope === spec.key.agentGroupId;
     case 'group-state': {
       if (mount.groupScope !== spec.key.agentGroupId) return false;
       if (underRoot(mount.hostPath, `${policy.dataRoot}/v2-sessions/${mount.groupScope}`)) return true;

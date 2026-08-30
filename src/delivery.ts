@@ -255,10 +255,17 @@ async function drainSession(session: Session): Promise<void> {
 
   for (const msg of pending) {
     try {
-      const platformMsgId = await deliverMessage(msg, session);
-      await withExistingMailboxSession(agentGroup.id, session.id, (mailbox) =>
-        mailbox.markDelivered(msg.id, platformMsgId ?? null),
-      );
+      const outcome = await deliverMessage(msg, session);
+      const marked = await withExistingMailboxSession(agentGroup.id, session.id, (mailbox) => {
+        mailbox.markDelivered(msg.id, outcome.platformMsgId ?? null);
+        return true;
+      });
+      if (!marked) {
+        throw new Error(`Mailbox disappeared before delivery marker committed for ${msg.id}`);
+      }
+      if (!outcome.retainOutbox) {
+        await clearOutbox(agentGroup.id, session.id, msg.id);
+      }
       const firstDelivery = delivered.size === 0;
       delivered.add(msg.id);
       await clearAttemptRow(msg.id);
@@ -329,10 +336,10 @@ async function deliverMessage(
     inReplyTo: string | null;
   },
   session: Session,
-): Promise<string | undefined> {
+): Promise<{ platformMsgId?: string; retainOutbox?: boolean }> {
   if (!deliveryAdapter) {
     log.warn('No delivery adapter configured, dropping message', { id: msg.id });
-    return;
+    return {};
   }
 
   const content = JSON.parse(msg.content);
@@ -340,7 +347,7 @@ async function deliverMessage(
   // System actions — handle internally (cli_request, etc.)
   if (msg.kind === 'system') {
     await handleSystemAction(content, session);
-    return;
+    return {};
   }
 
   // Task-run log: the runner mirrors a run's final text here (one-door
@@ -358,7 +365,7 @@ async function deliverMessage(
     } else {
       log.warn('task_log row outside a task session — ignoring', { id: msg.id, sessionId: session.id });
     }
-    return;
+    return {};
   }
 
   // Agent-to-agent — route to target session via the agent-to-agent module.
@@ -370,7 +377,7 @@ async function deliverMessage(
       throw new Error(`agent-to-agent module not installed — cannot route message ${msg.id}`);
     }
     const { routeAgentMessage } = await import('./modules/agent-to-agent/agent-route.js');
-    await routeAgentMessage(
+    const route = await routeAgentMessage(
       {
         id: msg.id,
         platform_id: msg.platformId,
@@ -379,7 +386,7 @@ async function deliverMessage(
       },
       session,
     );
-    return;
+    return { retainOutbox: route === 'held' };
   }
 
   // Permission check: the source agent must be allowed to deliver to this
@@ -479,7 +486,7 @@ async function deliverMessage(
   // Channel delivery
   if (!msg.channelType || !msg.platformId) {
     log.warn('Message missing routing fields', { id: msg.id });
-    return;
+    return {};
   }
 
   // Read file attachments from outbox if the content declares files.
@@ -487,7 +494,7 @@ async function deliverMessage(
   // extractAttachmentFiles) — delivery just hands buffers to the adapter.
   const files =
     Array.isArray(content.files) && content.files.length > 0
-      ? readOutboxFiles(session.agent_group_id, session.id, msg.id, content.files as string[])
+      ? await readOutboxFiles(session.agent_group_id, session.id, msg.id, content.files as string[])
       : undefined;
 
   const platformMsgId = await deliveryAdapter.deliver(
@@ -507,9 +514,7 @@ async function deliverMessage(
     fileCount: files?.length,
   });
 
-  clearOutbox(session.agent_group_id, session.id, msg.id);
-
-  return platformMsgId;
+  return { platformMsgId };
 }
 
 /**

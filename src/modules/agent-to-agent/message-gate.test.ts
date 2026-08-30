@@ -6,11 +6,11 @@ import './guard.js'; // register the a2a.send catalog entry (incl. the policy ho
 import { routeAgentMessage } from './agent-route.js';
 import { createDestination, deleteDestination, deleteAllDestinationsTouching } from './db/agent-destinations.js';
 import { getMessagePolicy, removeMessagePolicy, setMessagePolicy } from './db/agent-message-policies.js';
-import { applyA2aMessageGate } from './message-gate.js';
+import { applyA2aMessageGate, cleanupA2aApprovalOutbox } from './message-gate.js';
 import { initTestDb, closeDb, runMigrations, createAgentGroup } from '../../db/index.js';
 import { getDb } from '../../db/connection.js';
 import { createPendingApproval, createSession, deletePendingApproval, getPendingApproval } from '../../db/sessions.js';
-import { requestApproval } from '../approvals/index.js';
+import { requestApprovalResult } from '../approvals/index.js';
 import { inboundDbPath } from '../../mailbox/sqlite/paths.js';
 import { initSessionFolder } from '../../session-manager.js';
 import type { PendingApproval, Session } from '../../types.js';
@@ -24,7 +24,7 @@ vi.mock('../../container-runner.js', () => ({
 
 vi.mock('../approvals/index.js', async (importActual) => {
   const actual = await importActual<typeof import('../approvals/index.js')>();
-  return { ...actual, requestApproval: vi.fn().mockResolvedValue(undefined) };
+  return { ...actual, requestApprovalResult: vi.fn().mockResolvedValue(true) };
 });
 
 vi.mock('../../config.js', async () => {
@@ -95,7 +95,7 @@ describe('agent message policies', () => {
     fs.mkdirSync(TEST_DIR, { recursive: true });
     const db = await initTestDb();
     await runMigrations(db);
-    vi.mocked(requestApproval).mockClear();
+    vi.mocked(requestApprovalResult).mockClear();
 
     await createAgentGroup({ id: A, name: 'A', folder: 'a', agent_provider: null, created_at: now() });
     await createAgentGroup({ id: B, name: 'B', folder: 'b', agent_provider: null, created_at: now() });
@@ -151,13 +151,13 @@ describe('agent message policies', () => {
       SA,
     );
     expect(readInbound(B, SB.id)).toHaveLength(1);
-    expect(requestApproval).not.toHaveBeenCalled();
+    expect(requestApprovalResult).not.toHaveBeenCalled();
   });
 
   it('policy present → holds the message and requests approval from the policy approver', async () => {
     await setMessagePolicy(A, B, 'telegram:dana', now());
 
-    await routeAgentMessage(
+    const outcome = await routeAgentMessage(
       { id: 'm2', platform_id: B, content: JSON.stringify({ text: 'sensitive' }), in_reply_to: null },
       SA,
     );
@@ -165,12 +165,25 @@ describe('agent message policies', () => {
     // Held: nothing routed to B.
     expect(readInbound(B, SB.id)).toHaveLength(0);
     // One approval requested, to the policy's approver.
-    expect(requestApproval).toHaveBeenCalledTimes(1);
-    const opts = vi.mocked(requestApproval).mock.calls[0][0];
+    expect(requestApprovalResult).toHaveBeenCalledTimes(1);
+    const opts = vi.mocked(requestApprovalResult).mock.calls[0][0];
     expect(opts.action).toBe('a2a_message_gate');
     expect(opts.approverUserId).toBe('telegram:dana');
     expect(opts.payload).toMatchObject({ id: 'm2', platform_id: B });
     expect(JSON.parse(String(opts.payload.content)).text).toBe('sensitive');
+    expect(outcome).toBe('held');
+  });
+
+  it('consumes without retaining bytes when no durable approval was queued', async () => {
+    await setMessagePolicy(A, B, 'telegram:dana', now());
+    vi.mocked(requestApprovalResult).mockResolvedValueOnce(false);
+
+    const outcome = await routeAgentMessage(
+      { id: 'no-approver', platform_id: B, content: JSON.stringify({ text: 'x' }), in_reply_to: null },
+      SA,
+    );
+
+    expect(outcome).toBe('terminal');
   });
 
   it('self-message is never gated even if a policy row somehow exists', async () => {
@@ -179,7 +192,7 @@ describe('agent message policies', () => {
       { id: 'self', platform_id: A, content: JSON.stringify({ text: 'note' }), in_reply_to: null },
       SA,
     );
-    expect(requestApproval).not.toHaveBeenCalled();
+    expect(requestApprovalResult).not.toHaveBeenCalled();
     expect(readInbound(A, SA.id)).toHaveLength(1);
   });
 
@@ -190,7 +203,7 @@ describe('agent message policies', () => {
     await expect(
       routeAgentMessage({ id: 'ghost', platform_id: B, content: JSON.stringify({ text: 'x' }), in_reply_to: null }, SA),
     ).rejects.toThrow(/unauthorized agent-to-agent/);
-    expect(requestApproval).not.toHaveBeenCalled();
+    expect(requestApprovalResult).not.toHaveBeenCalled();
     expect(readInbound(B, SB.id)).toHaveLength(0);
   });
 
@@ -209,7 +222,39 @@ describe('agent message policies', () => {
     expect(JSON.parse(bRows[0].content).text).toBe('approved!');
     expect(notify).not.toHaveBeenCalled();
     // The hold is satisfied by the grant — no second card.
-    expect(requestApproval).not.toHaveBeenCalled();
+    expect(requestApprovalResult).not.toHaveBeenCalled();
+  });
+
+  it('forwards held attachment bytes before cleaning them on approve', async () => {
+    await setMessagePolicy(A, B, 'telegram:dana', now());
+    const payload = {
+      id: 'held-file-approve',
+      platform_id: B,
+      content: JSON.stringify({ text: 'file', files: ['report.pdf'] }),
+      in_reply_to: null,
+    };
+    const approval = await seedA2aHold('appr-file-approve', payload);
+    const outbox = `${TEST_DIR}/v2-sessions/${A}/${SA.id}/outbox/${payload.id}`;
+    fs.mkdirSync(outbox, { recursive: true });
+    fs.writeFileSync(`${outbox}/report.pdf`, 'held-bytes');
+
+    await applyA2aMessageGate({ session: SA, userId: 'telegram:dana', notify: vi.fn(), payload, approval });
+
+    expect(fs.existsSync(outbox)).toBe(false);
+    const forwarded = JSON.parse(readInbound(B, SB.id)[0].content).attachments[0];
+    expect(fs.readFileSync(`${TEST_DIR}/v2-sessions/${B}/${SB.id}/${forwarded.localPath}`, 'utf8')).toBe('held-bytes');
+  });
+
+  it('cleans held attachment bytes when the approval is rejected', async () => {
+    const payload = { id: 'held-file-reject', platform_id: B, content: '{}', in_reply_to: null };
+    const approval = await seedA2aHold('appr-file-reject', payload);
+    const outbox = `${TEST_DIR}/v2-sessions/${A}/${SA.id}/outbox/${payload.id}`;
+    fs.mkdirSync(outbox, { recursive: true });
+    fs.writeFileSync(`${outbox}/report.pdf`, 'held-bytes');
+
+    await cleanupA2aApprovalOutbox({ approval, session: SA, outcome: 'reject', userId: 'telegram:dana' });
+
+    expect(fs.existsSync(outbox)).toBe(false);
   });
 
   it('destination revoked between hold and approve → refused cleanly, requester told, nothing delivered', async () => {

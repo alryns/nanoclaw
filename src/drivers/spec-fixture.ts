@@ -47,6 +47,20 @@ export function fixtureSpec(overrides: Partial<SessionSpec> = {}): SessionSpec {
             groupScope: 'g1',
           },
           {
+            class: 'mailbox-attachment',
+            hostPath: '/mailbox/agent-groups/g1/sessions/s1/inbox',
+            containerPath: '/workspace/inbox',
+            mode: 'ro',
+            groupScope: 'g1',
+          },
+          {
+            class: 'mailbox-attachment',
+            hostPath: '/mailbox/agent-groups/g1/sessions/s1/outbox',
+            containerPath: '/workspace/outbox',
+            mode: 'rw',
+            groupScope: 'g1',
+          },
+          {
             class: 'install-surface',
             hostPath: '/install/container/agent-runner/src',
             containerPath: '/app/src',

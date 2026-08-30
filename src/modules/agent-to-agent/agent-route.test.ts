@@ -8,6 +8,7 @@ import { log } from '../../log.js';
 import { createDestination } from './db/agent-destinations.js';
 import { initTestDb, closeDb, runMigrations, createAgentGroup } from '../../db/index.js';
 import { createSession, updateSession } from '../../db/sessions.js';
+import { getAgentMailbox } from '../../mailbox/index.js';
 import { inboundDbPath } from '../../mailbox/sqlite/paths.js';
 import { initSessionFolder, sessionDir, writeSessionMessage } from '../../session-manager.js';
 import type { Session } from '../../types.js';
@@ -452,6 +453,41 @@ describe('routeAgentMessage return-path', () => {
     expect(fs.readFileSync(targetPath, 'utf-8')).toBe('fake-pdf-bytes');
   });
 
+  it('file forwarding: uses mailbox-selected attachment roots', async () => {
+    const attachmentRoot = path.join(TEST_DIR, 'mailbox-attachments');
+    const mounts = vi.spyOn(getAgentMailbox(), 'attachmentMounts').mockImplementation(async (key) => {
+      const root = path.join(attachmentRoot, key.agentGroupId, key.sessionId);
+      const inboxHostPath = path.join(root, 'inbox');
+      const outboxHostPath = path.join(root, 'outbox');
+      fs.mkdirSync(inboxHostPath, { recursive: true });
+      fs.mkdirSync(outboxHostPath, { recursive: true });
+      return { inboxHostPath, outboxHostPath };
+    });
+
+    try {
+      const outboxDir = path.join(attachmentRoot, A, S1.id, 'outbox', 'msg-mailbox-root');
+      fs.mkdirSync(outboxDir, { recursive: true });
+      fs.writeFileSync(path.join(outboxDir, 'report.pdf'), 'mailbox-root-bytes');
+
+      await routeAgentMessage(
+        {
+          id: 'msg-mailbox-root',
+          platform_id: B,
+          content: JSON.stringify({ text: 'see attached', files: ['report.pdf'] }),
+          in_reply_to: null,
+        },
+        S1,
+      );
+
+      const parsed = JSON.parse(readInbound(B, SB.id)[0].content);
+      const targetPath = path.join(attachmentRoot, B, SB.id, parsed.attachments[0].localPath);
+      expect(fs.readFileSync(targetPath, 'utf-8')).toBe('mailbox-root-bytes');
+      expect(fs.existsSync(path.join(sessionDir(B, SB.id), parsed.attachments[0].localPath))).toBe(false);
+    } finally {
+      mounts.mockRestore();
+    }
+  });
+
   it('file forwarding: skips symlinked source files', async () => {
     const secretPath = path.join(TEST_DIR, 'host-secret.txt');
     fs.writeFileSync(secretPath, 'host-secret-bytes');
@@ -533,7 +569,7 @@ describe('routeAgentMessage return-path', () => {
     fs.mkdirSync(realInbox, { recursive: true });
     fs.symlinkSync(canaryDir, path.join(realInbox, targetMsgId));
 
-    const attachments = forwardAttachedFiles(
+    const attachments = await forwardAttachedFiles(
       { agentGroupId: A, sessionId: S1.id, messageId: 'msg-evil-subdir', filenames: ['pwn.txt'] },
       { agentGroupId: B, sessionId: SB.id, messageId: targetMsgId },
     );
@@ -563,7 +599,7 @@ describe('routeAgentMessage return-path', () => {
     fs.mkdirSync(realInboxSubdir, { recursive: true });
     fs.symlinkSync(canaryFile, path.join(realInboxSubdir, 'doc.txt'));
 
-    const attachments = forwardAttachedFiles(
+    const attachments = await forwardAttachedFiles(
       { agentGroupId: A, sessionId: S1.id, messageId: 'msg-evil-dst', filenames: ['doc.txt'] },
       { agentGroupId: B, sessionId: SB.id, messageId: targetMsgId },
     );

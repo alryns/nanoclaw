@@ -19,6 +19,11 @@ vi.mock('./container-runner.js', () => ({
   buildAgentGroupImage: vi.fn().mockResolvedValue(undefined),
 }));
 
+vi.mock('./modules/approvals/index.js', async (importActual) => {
+  const actual = await importActual<typeof import('./modules/approvals/index.js')>();
+  return { ...actual, requestApprovalResult: vi.fn().mockResolvedValue(true) };
+});
+
 vi.mock('./config.js', async () => {
   const actual = await vi.importActual<typeof import('./config.js')>('./config.js');
   return { ...actual, DATA_DIR: '/tmp/nanoclaw-test-delivery', GROUPS_DIR: '/tmp/nanoclaw-test-delivery/groups' };
@@ -38,6 +43,8 @@ import {
 } from './delivery.js';
 import { createChannelDeliveryAdapter } from './channels/channel-registry.js';
 import { createDestination } from './modules/agent-to-agent/db/agent-destinations.js';
+import { setMessagePolicy } from './modules/agent-to-agent/db/agent-message-policies.js';
+import { requestApprovalResult } from './modules/approvals/index.js';
 import { getAgentMailbox } from './mailbox/index.js';
 import { log } from './log.js';
 
@@ -77,11 +84,38 @@ function insertOutbound(agentGroupId: string, sessionId: string, msgId: string):
   db.close();
 }
 
+function insertOutboundFile(agentGroupId: string, sessionId: string, msgId: string): string {
+  const db = new Database(outboundDbPath(agentGroupId, sessionId));
+  db.prepare(
+    `INSERT INTO messages_out (id, timestamp, kind, platform_id, channel_type, content)
+     VALUES (?, datetime('now'), 'chat', 'telegram:123', 'telegram', ?)`,
+  ).run(msgId, JSON.stringify({ text: 'file', files: ['result.txt'] }));
+  db.close();
+  const outbox = `${TEST_DIR}/v2-sessions/${agentGroupId}/${sessionId}/outbox/${msgId}`;
+  fs.mkdirSync(outbox, { recursive: true });
+  fs.writeFileSync(`${outbox}/result.txt`, 'result');
+  return outbox;
+}
+
+function insertAgentFile(agentGroupId: string, sessionId: string, msgId: string, target: string): string {
+  const db = new Database(outboundDbPath(agentGroupId, sessionId));
+  db.prepare(
+    `INSERT INTO messages_out (id, timestamp, kind, platform_id, channel_type, content)
+     VALUES (?, datetime('now'), 'chat', ?, 'agent', ?)`,
+  ).run(msgId, target, JSON.stringify({ text: 'file', files: ['result.txt'] }));
+  db.close();
+  const outbox = `${TEST_DIR}/v2-sessions/${agentGroupId}/${sessionId}/outbox/${msgId}`;
+  fs.mkdirSync(outbox, { recursive: true });
+  fs.writeFileSync(`${outbox}/result.txt`, 'result');
+  return outbox;
+}
+
 beforeEach(async () => {
   if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
   fs.mkdirSync(TEST_DIR, { recursive: true });
   const db = await initTestDb();
   await runMigrations(db);
+  vi.mocked(requestApprovalResult).mockClear();
 });
 
 afterEach(async () => {
@@ -182,6 +216,79 @@ describe('deliverSessionMessages — concurrent invocations', () => {
     await deliverSessionMessages(session);
 
     expect(callCount).toBe(1);
+  });
+});
+
+describe('deliverSessionMessages — attachment cleanup order', () => {
+  it('keeps outbox bytes when the durable delivery marker fails', async () => {
+    await seedAgentAndChannel();
+    const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
+    const outbox = insertOutboundFile('ag-1', session.id, 'out-marker-fail');
+    setDeliveryAdapter({
+      async deliver() {
+        return 'platform-file';
+      },
+    });
+
+    const mailbox = getAgentMailbox();
+    const originalSession = mailbox.session.bind(mailbox);
+    const sessionSpy = vi.spyOn(mailbox, 'session');
+    sessionSpy.mockImplementationOnce(originalSession);
+    sessionSpy.mockRejectedValueOnce(new Error('marker failed'));
+
+    await deliverSessionMessages(session);
+    expect(fs.readFileSync(`${outbox}/result.txt`, 'utf8')).toBe('result');
+    sessionSpy.mockRestore();
+  });
+
+  it('keeps outbox bytes when the mailbox disappears before the marker', async () => {
+    await seedAgentAndChannel();
+    const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
+    const outbox = insertOutboundFile('ag-1', session.id, 'out-missing-marker');
+    setDeliveryAdapter({
+      async deliver() {
+        return 'platform-file';
+      },
+    });
+
+    const exists = vi.spyOn(getAgentMailbox(), 'exists');
+    exists.mockResolvedValueOnce(true);
+    exists.mockResolvedValueOnce(false);
+
+    await deliverSessionMessages(session);
+    expect(fs.readFileSync(`${outbox}/result.txt`, 'utf8')).toBe('result');
+    exists.mockRestore();
+  });
+
+  it('keeps a2a outbox bytes while the durable approval is pending', async () => {
+    await seedAgentAndChannel();
+    await createAgentGroup({
+      id: 'ag-2',
+      name: 'Target Agent',
+      folder: 'target-agent',
+      agent_provider: null,
+      created_at: now(),
+    });
+    await createDestination({
+      agent_group_id: 'ag-1',
+      local_name: 'target',
+      target_type: 'agent',
+      target_id: 'ag-2',
+      created_at: now(),
+    });
+    await setMessagePolicy('ag-1', 'ag-2', 'telegram:dana', now());
+    const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
+    const outbox = insertAgentFile('ag-1', session.id, 'out-a2a-held', 'ag-2');
+    setDeliveryAdapter({
+      async deliver() {
+        return undefined;
+      },
+    });
+
+    await deliverSessionMessages(session);
+
+    expect(fs.readFileSync(`${outbox}/result.txt`, 'utf8')).toBe('result');
+    expect(vi.mocked(requestApprovalResult)).toHaveBeenCalledTimes(1);
   });
 });
 

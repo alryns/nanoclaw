@@ -1,4 +1,5 @@
 import fs from 'fs';
+import path from 'path';
 import type Database from 'better-sqlite3';
 
 import { log } from '../../log.js';
@@ -450,6 +451,15 @@ export class SqliteAgentMailbox implements AgentMailbox {
 
   async runnerEnvironment(_key: MailboxSessionKey): Promise<Record<string, string>> {
     return {};
+  }
+
+  async attachmentMounts(key: MailboxSessionKey) {
+    const root = sessionMailboxDir(key);
+    const inboxHostPath = path.join(root, 'inbox');
+    const outboxHostPath = path.join(root, 'outbox');
+    fs.mkdirSync(inboxHostPath, { recursive: true });
+    fs.mkdirSync(outboxHostPath, { recursive: true });
+    return { inboxHostPath, outboxHostPath };
   }
 
   async session<T>(key: MailboxSessionKey, action: (mailbox: MailboxSession) => T | Promise<T>): Promise<T> {

@@ -39,25 +39,27 @@ export async function finalizeReject(
     ? `Your ${approval.action} request was rejected by admin: "${reason}"`
     : `Your ${approval.action} request was rejected by admin.`;
 
-  await writeSessionMessage(session.agent_group_id, session.id, {
-    id: `appr-note-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-    kind: 'chat',
-    timestamp: new Date().toISOString(),
-    platformId: session.agent_group_id,
-    channelType: 'agent',
-    threadId: null,
-    content: JSON.stringify({ text, sender: 'system', senderId: 'system' }),
-  });
+  try {
+    await writeSessionMessage(session.agent_group_id, session.id, {
+      id: `appr-note-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      kind: 'chat',
+      timestamp: new Date().toISOString(),
+      platformId: session.agent_group_id,
+      channelType: 'agent',
+      threadId: null,
+      content: JSON.stringify({ text, sender: 'system', senderId: 'system' }),
+    });
 
-  log.info('Approval rejected', {
-    approvalId: approval.approval_id,
-    action: approval.action,
-    userId,
-    withReason: reason !== undefined,
-  });
-
-  await deletePendingApproval(approval.approval_id);
-  await notifyApprovalResolved({ approval, session, outcome: 'reject', userId });
-  await requestWake(session, 'approval-response');
+    log.info('Approval rejected', {
+      approvalId: approval.approval_id,
+      action: approval.action,
+      userId,
+      withReason: reason !== undefined,
+    });
+  } finally {
+    await deletePendingApproval(approval.approval_id);
+    await notifyApprovalResolved({ approval, session, outcome: 'reject', userId });
+    await requestWake(session, 'approval-response');
+  }
   return true;
 }

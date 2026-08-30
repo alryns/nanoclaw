@@ -22,11 +22,11 @@
  * throw because the module isn't installed.
  */
 import { reenterGuardedDeliveryAction, registerDeliveryAction } from '../../delivery.js';
-import { notifyAgent, registerApprovalHandler } from '../approvals/index.js';
+import { notifyAgent, registerApprovalHandler, registerApprovalResolvedHandler } from '../approvals/index.js';
 import { A2A_MESSAGE_GATE_ACTION } from './agent-route.js';
 import { createAgent, requestCreateAgentHold, validateCreateAgent } from './create-agent.js';
 import { agentsCreate } from './guard.js';
-import { applyA2aMessageGate } from './message-gate.js';
+import { applyA2aMessageGate, cleanupA2aApprovalOutbox } from './message-gate.js';
 
 registerDeliveryAction('create_agent', createAgent, {
   guardAction: agentsCreate,
@@ -37,3 +37,4 @@ registerDeliveryAction('create_agent', createAgent, {
 registerApprovalHandler('create_agent', reenterGuardedDeliveryAction('create_agent'));
 
 registerApprovalHandler(A2A_MESSAGE_GATE_ACTION, applyA2aMessageGate);
+registerApprovalResolvedHandler((event) => (event.outcome === 'reject' ? cleanupA2aApprovalOutbox(event) : undefined));

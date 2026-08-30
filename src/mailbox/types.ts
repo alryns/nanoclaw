@@ -89,6 +89,11 @@ export interface MailboxTimelineMessage {
   content: string;
 }
 
+export interface SessionAttachmentMounts {
+  inboxHostPath: string;
+  outboxHostPath: string;
+}
+
 /** Host-visible inbound mailbox behavior. Storage layout and lifecycle are implementation-private. */
 export interface InboundMailbox {
   setRouting(routing: SessionRouting): void;
@@ -155,6 +160,11 @@ export interface AgentMailbox {
   runnerContext(key: MailboxSessionKey): Promise<unknown>;
   /** Non-secret runner configuration only; never credentials, authorization material, or identity. */
   runnerEnvironment(key: MailboxSessionKey): Promise<Record<string, string>>;
+  /**
+   * Host paths mounted at /workspace/inbox and /workspace/outbox.
+   * Implementations must fail when their backing mount is unavailable.
+   */
+  attachmentMounts(key: MailboxSessionKey): Promise<SessionAttachmentMounts>;
   /**
    * Run one logical operation against a session's mailbox.
    *

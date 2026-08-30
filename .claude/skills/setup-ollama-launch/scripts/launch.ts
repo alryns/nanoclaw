@@ -345,6 +345,10 @@ async function applyBundledSkill(name: string): Promise<boolean> {
   return changed;
 }
 
+export function providerPayloadNeedsContainerBuild(onboarded: boolean, providerChanged: boolean): boolean {
+  return onboarded && providerChanged;
+}
+
 function runSetupStep(step: string, args: string[] = [], env?: NodeJS.ProcessEnv): void {
   console.error(`[ollama-launch] ${step}`);
   const result = spawnSync('pnpm', ['exec', 'tsx', 'setup/index.ts', '--step', step, ...args], {
@@ -556,10 +560,9 @@ async function main(): Promise<number> {
   await warmOllama(baseUrl, runtimeModel);
   if (contextLength !== undefined) await verifyOllamaContext(baseUrl, runtimeModel, contextLength);
 
-  let skillsChanged = false;
-  for (const skill of ['add-ollama-provider', 'add-local-web-chat']) {
-    skillsChanged = (await applyBundledSkill(skill)) || skillsChanged;
-  }
+  const providerChanged = await applyBundledSkill('add-ollama-provider');
+  const localWebChanged = await applyBundledSkill('add-local-web-chat');
+  const skillsChanged = providerChanged || localWebChanged;
 
   const onboarded = isUpgradeCurrent();
   if (!onboarded) {
@@ -569,6 +572,8 @@ async function main(): Promise<number> {
     runSetupStep('container', [], { ...process.env, DOCKER_BUILDKIT: '1' });
     runSetupStep('onecli', hasReusableOnecli() ? ['--reuse'] : []);
     runSetupStep('mounts', ['--empty']);
+  } else if (providerPayloadNeedsContainerBuild(onboarded, providerChanged)) {
+    runSetupStep('container', [], { ...process.env, DOCKER_BUILDKIT: '1' });
   }
 
   const previousBaseUrl = readEnvFile(['OLLAMA_BASE_URL']).OLLAMA_BASE_URL;

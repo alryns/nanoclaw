@@ -29,6 +29,7 @@ import {
   ensureWebWiring,
   hasReusableOnecli,
   parseArgs,
+  providerPayloadNeedsContainerBuild,
   rewriteBaseUrlForContainer,
   runSkillGitCommand,
   sendWiringWelcome,
@@ -265,6 +266,12 @@ describe('Ollama launch contract', () => {
     } finally {
       fs.rmSync(home, { recursive: true, force: true });
     }
+  });
+
+  it('rebuilds an onboarded agent image only when provider payload changed', () => {
+    expect(providerPayloadNeedsContainerBuild(true, true)).toBe(true);
+    expect(providerPayloadNeedsContainerBuild(true, false)).toBe(false);
+    expect(providerPayloadNeedsContainerBuild(false, true)).toBe(false);
   });
 
   it('parses the supported flags and rejects incomplete input', () => {

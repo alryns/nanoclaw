@@ -35,6 +35,7 @@ bash .claude/skills/setup-ollama-launch/scripts/launch.sh \
   --model <source-ollama-model> \
   --runtime-model <ollama-launch-context-alias> \
   --base-url http://127.0.0.1:11434 \
+  --web-browsing <enabled-or-disabled> \
   --context-length <model-maximum> \
   --display-name <operator-name> \
   --agent-name Ollama
@@ -51,6 +52,12 @@ otherwise it gets admin scoped to the launched group.
 When setup creates the local-web wiring, it queues the standard `/welcome` turn
 once through the normal channel path; later launches and browser reconnects do
 not repeat it.
+
+The Ollama CLI owns the browsing consent, sign-in, cloud-status check, and live
+Web Search/Web Fetch probes. The launcher accepts only the verified
+`enabled|disabled` result and persists it for the host provider. Browsing calls
+still go through the local Ollama daemon; NanoClaw neither receives nor stores an
+Ollama API key. Re-run `ollama launch nanoclaw --config` to change the choice.
 
 Model identity, context handling, warm-up, and the rest of the provider's
 behavior: `docs/ollama.md`.

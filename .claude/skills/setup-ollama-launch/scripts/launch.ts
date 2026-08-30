@@ -58,6 +58,7 @@ export interface LaunchArgs {
   model: string;
   runtimeModel: string;
   baseUrl: string;
+  webBrowsing: 'enabled' | 'disabled';
   displayName?: string;
   agentName?: string;
   group?: string;
@@ -68,12 +69,16 @@ export type ParseResult = { ok: true; value: LaunchArgs } | { ok: false; message
 
 export function parseArgs(argv: string[]): ParseResult {
   const values: Partial<
-    Record<'model' | 'runtimeModel' | 'baseUrl' | 'displayName' | 'agentName' | 'group' | 'contextLength', string>
+    Record<
+      'model' | 'runtimeModel' | 'baseUrl' | 'webBrowsing' | 'displayName' | 'agentName' | 'group' | 'contextLength',
+      string
+    >
   > = {};
   const flags: Record<string, keyof typeof values> = {
     '--model': 'model',
     '--runtime-model': 'runtimeModel',
     '--base-url': 'baseUrl',
+    '--web-browsing': 'webBrowsing',
     '--display-name': 'displayName',
     '--agent-name': 'agentName',
     '--group': 'group',
@@ -90,6 +95,10 @@ export function parseArgs(argv: string[]): ParseResult {
   }
   if (!values.model) return { ok: false, message: 'missing required argument: --model' };
   if (!values.baseUrl) return { ok: false, message: 'missing required argument: --base-url' };
+  if (!values.webBrowsing) return { ok: false, message: 'missing required argument: --web-browsing' };
+  if (!['enabled', 'disabled'].includes(values.webBrowsing)) {
+    return { ok: false, message: '--web-browsing must be enabled or disabled' };
+  }
   const contextLength = values.contextLength === undefined ? undefined : Number(values.contextLength);
   if (contextLength !== undefined && (!Number.isSafeInteger(contextLength) || contextLength <= 0)) {
     return { ok: false, message: '--context-length must be a positive integer' };
@@ -100,6 +109,7 @@ export function parseArgs(argv: string[]): ParseResult {
       model: values.model,
       runtimeModel: values.runtimeModel ?? values.model,
       baseUrl: values.baseUrl,
+      webBrowsing: values.webBrowsing as 'enabled' | 'disabled',
       ...(values.displayName && { displayName: values.displayName }),
       ...(values.agentName && { agentName: values.agentName }),
       ...(values.group && { group: values.group }),
@@ -531,7 +541,7 @@ async function main(): Promise<number> {
     throw new LaunchError(3, 'NANOCLAW_EGRESS_LOCKDOWN=true blocks access to host-loopback Ollama');
   }
 
-  const { model, runtimeModel, baseUrl, displayName, agentName, group, contextLength } = parsed.value;
+  const { model, runtimeModel, baseUrl, webBrowsing, displayName, agentName, group, contextLength } = parsed.value;
   const containerBaseUrl = rewriteBaseUrlForContainer(baseUrl);
   const webPort = configuredWebPort();
   const webUrl = `http://127.0.0.1:${webPort}`;
@@ -551,8 +561,16 @@ async function main(): Promise<number> {
     runSetupStep('mounts', ['--empty']);
   }
 
+  // Validate the model before persisting launch state. Browsing was already
+  // verified through Ollama's local endpoints by the CLI before this handoff.
+  console.error(`[ollama-launch] warming ${model}`);
+  await warmOllama(baseUrl, runtimeModel);
+  if (contextLength !== undefined) await verifyOllamaContext(baseUrl, runtimeModel, contextLength);
+
   const previousBaseUrl = readEnvFile(['OLLAMA_BASE_URL']).OLLAMA_BASE_URL;
+  const previousWebBrowsing = readEnvFile(['OLLAMA_WEB_BROWSING']).OLLAMA_WEB_BROWSING;
   upsertEnvVar('OLLAMA_BASE_URL', containerBaseUrl);
+  upsertEnvVar('OLLAMA_WEB_BROWSING', webBrowsing);
   upsertEnvVar('NANOCLAW_LOCAL_WEB_PORT', String(webPort));
   if (displayName && !group) {
     const args = ['--display-name', displayName];
@@ -569,13 +587,10 @@ async function main(): Promise<number> {
     (previousConfig?.provider ?? 'claude').toLowerCase() !== 'ollama' ||
     previousConfig?.model !== model ||
     (ownsInstall && previousConfig?.cli_scope !== 'global') ||
-    previousBaseUrl !== containerBaseUrl;
+    previousBaseUrl !== containerBaseUrl ||
+    previousWebBrowsing !== webBrowsing;
   await applyLaunchContainerConfig(agentGroup.id, model, ownsInstall);
   const runtimeModelChanged = writeOllamaModelState(model, runtimeModel, contextLength);
-
-  console.error(`[ollama-launch] warming ${model}`);
-  await warmOllama(baseUrl, runtimeModel);
-  if (contextLength !== undefined) await verifyOllamaContext(baseUrl, runtimeModel, contextLength);
 
   // Rebuild only for a first install, newly-applied files, or a config change.
   // Warm before restart and queue the wiring welcome only after the web channel is ready.

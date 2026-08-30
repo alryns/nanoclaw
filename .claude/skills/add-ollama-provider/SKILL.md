@@ -25,6 +25,8 @@ container/agent-runner/src/providers/ollama.ts
 container/agent-runner/src/providers/ollama.test.ts
 container/agent-runner/src/providers/ollama-registration.test.ts
 container/agent-runner/src/providers/ollama-tool-policy.test.ts
+container/agent-runner/src/mcp-tools/ollama-web.ts
+container/agent-runner/src/mcp-tools/ollama-web.test.ts
 ```
 
 ### 2. Register both provider halves
@@ -35,6 +37,10 @@ import './ollama.js';
 
 ```nc:append to:container/agent-runner/src/providers/index.ts
 import './ollama.js';
+```
+
+```nc:append to:container/agent-runner/src/mcp-tools/index.ts
+import './ollama-web.js';
 ```
 
 ### 3. Build and validate
@@ -49,7 +55,7 @@ pnpm exec vitest run src/providers/ollama-registration.test.ts src/providers/oll
 ```
 
 ```nc:run effect:test
-cd container/agent-runner && bun test src/providers/ollama.test.ts src/providers/ollama-registration.test.ts src/providers/ollama-tool-policy.test.ts
+cd container/agent-runner && bun test src/providers/ollama.test.ts src/providers/ollama-registration.test.ts src/providers/ollama-tool-policy.test.ts src/mcp-tools/ollama-web.test.ts
 ```
 
 ## Configure an agent group
@@ -71,9 +77,12 @@ ncl groups restart --id <agent-group-id>
 
 The provider sends a placeholder token directly to Ollama, blocks Anthropic and
 Claude service hosts, and disables Claude Code's cloud-only integrations and
-background traffic; `WebSearch`, `WebFetch`, and the local `agent-browser` skill
-stay available. Nothing else needs editing: no group `container.json`, Claude
-settings file, proxy, or API key.
+background traffic. Web browsing defaults to disabled. When
+`OLLAMA_WEB_BROWSING=enabled`, native `WebSearch` and an Ollama-backed
+`WebFetch` alias both use the local daemon's hosted Ollama endpoints; NanoClaw
+does not receive or store an Ollama API key. The local `agent-browser` remains
+available for interactive browser work. Nothing else needs editing: no group
+`container.json`, Claude settings file, proxy, or API key.
 
 Behavior details, including the `WebFetch` preflight skip and the
 runaway-generation caps: `docs/ollama.md`.

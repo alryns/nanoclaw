@@ -18,9 +18,8 @@ agent container -> http://host.docker.internal:11434 -> Ollama
 The provider applies its routing after OneCLI configuration, supplies only an
 Ollama placeholder token, blanks any Claude OAuth token, and maps Anthropic and
 Claude service hostnames to `0.0.0.0` inside the container. It also disables
-Claude Code's cloud-only integrations and background traffic. `WebSearch` and
-`WebFetch` both remain available, and interactive browsing uses the local
-`agent-browser` skill.
+Claude Code's cloud-only integrations and background traffic. Interactive
+browsing still uses the local `agent-browser` skill.
 Ollama cloud models are still reached through the local Ollama daemon rather
 than an upstream API called directly by NanoClaw.
 
@@ -29,13 +28,30 @@ own cloud endpoints, not general egress containment. Other traffic the container
 originates is unaffected, and `NANOCLAW_EGRESS_LOCKDOWN` is not an option here
 because it also severs the route to host-loopback Ollama.
 
-`WebFetch` works under the cloud block because the provider sets
-`skipWebFetchPreflight: true`. That skips only the Claude CLI's advisory
-domain-safety check, a call to `https://api.anthropic.com/api/web/domain_info`
-that the block intentionally blackholes (the CLI reports the failure as a
-misleading claude.ai error). The fetch itself runs client-side in the container
-and its summarization step runs against the local Ollama URL, so no request
-leaves for Anthropic and the block stays fully intact.
+## Optional Ollama web browsing
+
+Web browsing is off by default. On first launch, the Ollama CLI offers to enable
+it and clearly states that queries and fetched URLs leave the machine. Enabling
+requires a free Ollama account. The CLI checks whether Ollama Cloud is enabled,
+runs the normal Ollama sign-in flow if needed, and verifies both Web Search and
+Web Fetch before it saves `OLLAMA_WEB_BROWSING=enabled`. Re-run `ollama launch
+nanoclaw --config` to change the choice.
+
+When enabled, both tools are Ollama-owned:
+
+- `WebSearch` uses the Ollama daemon's native Anthropic-compatible search tool.
+- `WebFetch` is aliased to NanoClaw's small adapter for the daemon's
+  `/api/experimental/web_fetch` endpoint.
+
+The agent container sends both requests only to `host.docker.internal`; the
+daemon signs the hosted request with the account created by `ollama signin`.
+NanoClaw never mounts `~/.ollama`, never receives an Ollama API key, and never
+routes these calls through OneCLI. OneCLI remains active for unrelated services
+such as Google, Slack, or GitHub, because only the local Ollama hostname is in
+`NO_PROXY`.
+
+When browsing is disabled, both model-facing web tools are removed. The local
+`agent-browser` remains available for interactive browser automation.
 
 Two container environment settings bound a runaway local generation.
 `CLAUDE_CODE_MAX_OUTPUT_TOKENS` (8192) ends it by output length instead of

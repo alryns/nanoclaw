@@ -264,6 +264,8 @@ describe('Ollama launch contract', () => {
         'nanoclaw/abc123:latest',
         '--base-url',
         'http://127.0.0.1:11434',
+        '--web-browsing',
+        'enabled',
         '--display-name',
         'Amit',
         '--context-length',
@@ -275,11 +277,23 @@ describe('Ollama launch contract', () => {
         model: 'qwen3',
         runtimeModel: 'nanoclaw/abc123:latest',
         baseUrl: 'http://127.0.0.1:11434',
+        webBrowsing: 'enabled',
         displayName: 'Amit',
         contextLength: 40960,
       },
     });
-    expect(parseArgs(['--model', 'qwen3', '--base-url', 'http://127.0.0.1:11434', '--context-length', 'all'])).toEqual({
+    expect(
+      parseArgs([
+        '--model',
+        'qwen3',
+        '--base-url',
+        'http://127.0.0.1:11434',
+        '--web-browsing',
+        'disabled',
+        '--context-length',
+        'all',
+      ]),
+    ).toEqual({
       ok: false,
       message: '--context-length must be a positive integer',
     });
@@ -287,10 +301,33 @@ describe('Ollama launch contract', () => {
       ok: false,
       message: 'missing value for --model',
     });
-    expect(parseArgs(['--model', 'qwen3', '--base-url', 'http://127.0.0.1:11434'])).toMatchObject({
+    expect(
+      parseArgs([
+        '--model',
+        'qwen3',
+        '--base-url',
+        'http://127.0.0.1:11434',
+        '--web-browsing',
+        'disabled',
+      ]),
+    ).toMatchObject({
       ok: true,
-      value: { model: 'qwen3', runtimeModel: 'qwen3' },
+      value: { model: 'qwen3', runtimeModel: 'qwen3', webBrowsing: 'disabled' },
     });
+    expect(parseArgs(['--model', 'qwen3', '--base-url', 'http://127.0.0.1:11434'])).toEqual({
+      ok: false,
+      message: 'missing required argument: --web-browsing',
+    });
+    expect(
+      parseArgs([
+        '--model',
+        'qwen3',
+        '--base-url',
+        'http://127.0.0.1:11434',
+        '--web-browsing',
+        'maybe',
+      ]),
+    ).toEqual({ ok: false, message: '--web-browsing must be enabled or disabled' });
   });
 
   it('stores the source-to-runtime model mapping outside the agent workspace', () => {

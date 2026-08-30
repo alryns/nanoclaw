@@ -10,6 +10,10 @@ if ! command -v pnpm >/dev/null 2>&1 || ! node -e "require('better-sqlite3')" >/
 fi
 
 export PATH="$HOME/.local/bin:$PATH"
+# setup.sh selects the pinned package manager. Keep pnpm's self-switcher off for
+# this process and every setup/skill subprocess; with a fresh HOME it otherwise
+# recursively launches `pnpm add pnpm@<pin>` before NanoClaw can start.
+export npm_config_manage_package_manager_versions=false
 if ! command -v node >/dev/null 2>&1 && command -v brew >/dev/null 2>&1; then
   NODE22_PREFIX="$(brew --prefix node@22 2>/dev/null || true)"
   if [ -n "$NODE22_PREFIX" ]; then

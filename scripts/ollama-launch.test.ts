@@ -40,6 +40,16 @@ import {
 afterEach(async () => closeDb());
 
 describe('Ollama launch contract', () => {
+  it('keeps pnpm from recursively self-installing in a fresh home', () => {
+    const setup = fs.readFileSync(path.join(process.cwd(), 'setup.sh'), 'utf8');
+    const launcher = fs.readFileSync(
+      path.join(process.cwd(), '.claude/skills/setup-ollama-launch/scripts/launch.sh'),
+      'utf8',
+    );
+    expect(setup).toContain('export npm_config_manage_package_manager_versions=false');
+    expect(launcher).toContain('export npm_config_manage_package_manager_versions=false');
+  });
+
   it('recovers pnpm installed by bootstrap outside the inherited PATH', () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoclaw-launch-path-'));
     const home = path.join(root, 'home');

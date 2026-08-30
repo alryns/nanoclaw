@@ -135,44 +135,6 @@ describe('decideStuckAction', () => {
     expect(res.action).toBe('ok');
   });
 
-  it('honors a wider resolved ceiling instead of the built-in default', () => {
-    const twoHrMs = 2 * 60 * 60 * 1000;
-    // 45 min quiet — dead under the default ceiling, fine under a 2h one.
-    expect(
-      decideStuckAction({
-        now: BASE,
-        heartbeatMtimeMs: BASE - 45 * 60 * 1000,
-        containerState: null,
-        claims: [],
-        ceilingMs: twoHrMs,
-      }).action,
-    ).toBe('ok');
-    const over = decideStuckAction({
-      now: BASE,
-      heartbeatMtimeMs: BASE - (twoHrMs + 1),
-      containerState: null,
-      claims: [],
-      ceilingMs: twoHrMs,
-    });
-    expect(over).toEqual({ action: 'kill-ceiling', heartbeatAgeMs: twoHrMs + 1, ceilingMs: twoHrMs });
-  });
-
-  it('still extends a custom ceiling for a longer declared Bash timeout', () => {
-    const res = decideStuckAction({
-      now: BASE,
-      // 3h quiet: over the 2h group ceiling, under the 4h Bash timeout.
-      heartbeatMtimeMs: BASE - 3 * 60 * 60 * 1000,
-      containerState: {
-        currentTool: 'Bash',
-        toolDeclaredTimeoutMs: 4 * 60 * 60 * 1000,
-        toolStartedAt: parseIsoTimestamp(new Date(BASE - 3 * 60 * 60 * 1000).toISOString()),
-      },
-      claims: [],
-      ceilingMs: 2 * 60 * 60 * 1000,
-    });
-    expect(res.action).toBe('ok');
-  });
-
   it('returns kill-claim when a claim is past 60s and heartbeat has not moved', () => {
     const claimedAgeMs = CLAIM_STUCK_MS + 10_000;
     const res = decideStuckAction({

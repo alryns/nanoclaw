@@ -13,8 +13,8 @@
  *
  *   If the container IS running:
  *     1. Absolute ceiling: heartbeat age > max(turn ceiling, current_bash_timeout)
- *        where the turn ceiling is 30 min unless overridden per group or via
- *        NANOCLAW_TURN_CEILING_MS
+ *        where the turn ceiling is 30 min unless NANOCLAW_TURN_CEILING_MS
+ *        raises it
  *        → kill. Covers the "alive but silent for 30 min" case. Extended
  *        only while Bash is declared as running longer, honouring the
  *        user's own timeout directive. Kill then resets processing rows.
@@ -34,10 +34,9 @@ import fs from 'fs';
 
 import { ensureEgressNetwork } from './egress-lockdown.js';
 import { TURN_CEILING_MS_RAW } from './config.js';
-import { DEFAULT_TURN_CEILING_MS, resolveTurnCeilingMs } from './turn-ceiling.js';
+import { resolveTurnCeilingMs } from './turn-ceiling.js';
 import { getActiveSessions, isTaskThread, updateSession } from './db/sessions.js';
 import { getAgentGroup } from './db/agent-groups.js';
-import { getContainerConfig } from './db/container-configs.js';
 import { log } from './log.js';
 import { heartbeatPath, withExistingMailboxSession } from './session-manager.js';
 import { getContainerStartedAtMs, isContainerRunning, killContainer, wakeContainer } from './container-runner.js';
@@ -47,34 +46,12 @@ import type { ContainerState, InboundMailbox, OutboundMailbox } from './mailbox/
 const SWEEP_INTERVAL_MS = 60_000;
 // Absolute idle ceiling for a running container. If the heartbeat file hasn't
 // been touched in this long, the container is either stuck or doing genuinely
-// nothing — kill and restart on the next inbound. This is the built-in
-// default; the effective ceiling is resolved per group (group override →
-// NANOCLAW_TURN_CEILING_MS env → this constant) because a slow local-model
-// backend can legitimately go longer than 30 min between stream events while
-// actively decoding (#3643).
-export const ABSOLUTE_CEILING_MS = DEFAULT_TURN_CEILING_MS;
-
-// Per-tick cache of resolved ceilings, keyed by agent group. One central-DB
-// read per agent group per sweep tick (not per session), taken BEFORE the
-// session mailbox is opened so serialized mailbox implementations never hold
-// a central read inside the session transaction. Cleared at the top of every
-// tick, so a `ncl groups config update --turn-ceiling-ms` change is honored
-// on the next tick — the no-restart apply semantic with a staleness bound of
-// one SWEEP_INTERVAL_MS (60s).
-const turnCeilingCache = new Map<string, number>();
-
-export function _clearTurnCeilingCacheForTesting(): void {
-  turnCeilingCache.clear();
-}
-
-export async function groupTurnCeilingMs(agentGroupId: string): Promise<number> {
-  const cached = turnCeilingCache.get(agentGroupId);
-  if (cached !== undefined) return cached;
-  const row = await getContainerConfig(agentGroupId);
-  const resolved = resolveTurnCeilingMs(row?.turn_ceiling_ms, TURN_CEILING_MS_RAW);
-  turnCeilingCache.set(agentGroupId, resolved);
-  return resolved;
-}
+// nothing — kill and restart on the next inbound. 30 minutes unless
+// NANOCLAW_TURN_CEILING_MS raises it, because a slow local-model backend can
+// legitimately go longer than 30 min between stream events while actively
+// decoding (#3643). Read once at startup: changing it needs a host restart,
+// like every other env var.
+export const ABSOLUTE_CEILING_MS = resolveTurnCeilingMs(TURN_CEILING_MS_RAW);
 // Stuck tolerance window applied per 'processing' claim — "did we see any
 // signs of life since this message was claimed?"
 export const CLAIM_STUCK_MS = 60 * 1000;
@@ -97,7 +74,6 @@ export function decideStuckAction(args: {
   containerStartedAtMs?: number; // fallback when heartbeat file absent
   containerState: ContainerState | null;
   claims: Array<{ messageId: string; statusChanged: string }>;
-  ceilingMs?: number; // resolved turn ceiling; absent = built-in default
 }): StuckDecision {
   const { now, heartbeatMtimeMs, containerStartedAtMs, containerState, claims } = args;
   const declaredBashMs = bashTimeoutMs(containerState);
@@ -121,7 +97,7 @@ export function decideStuckAction(args: {
   const effectiveHeartbeatMs = heartbeatMtimeMs !== 0 ? heartbeatMtimeMs : (containerStartedAtMs ?? 0);
   if (effectiveHeartbeatMs !== 0) {
     const heartbeatAge = now - effectiveHeartbeatMs;
-    const ceiling = Math.max(args.ceilingMs ?? ABSOLUTE_CEILING_MS, declaredBashMs ?? 0);
+    const ceiling = Math.max(ABSOLUTE_CEILING_MS, declaredBashMs ?? 0);
     if (heartbeatAge > ceiling) {
       return { action: 'kill-ceiling', heartbeatAgeMs: heartbeatAge, ceilingMs: ceiling };
     }
@@ -154,10 +130,6 @@ export function stopHostSweep(): void {
 
 async function sweep(): Promise<void> {
   if (!running) return;
-
-  // New tick: re-resolve group turn ceilings so config changes apply without
-  // a restart (staleness bound = one sweep interval).
-  turnCeilingCache.clear();
 
   // Re-heal the egress network so already-running agents keep their gateway hop
   // if it was detached out-of-band. Best-effort here: a heal failure isn't a
@@ -209,15 +181,12 @@ async function sweepSession(session: Session): Promise<void> {
   try {
     let dueCount = 0;
     let shouldWake = false;
-    // Resolved outside the mailbox session: central-DB reads must not ride
-    // inside the session transaction (see the wake-path comment below).
-    const turnCeilingMs = await groupTurnCeilingMs(agentGroup.id);
     const exists = await withExistingMailboxSession(agentGroup.id, session.id, async (mailbox) => {
       mailbox.applyProcessingAcks(mailbox.getTerminalProcessingAcks());
       dueCount = mailbox.countDueMessages();
       shouldWake = dueCount > 0 && !isContainerRunning(session.id);
       if (!shouldWake) {
-        await maintainSessionMailbox(mailbox, session, agentGroup.id, false, turnCeilingMs);
+        await maintainSessionMailbox(mailbox, session, agentGroup.id, false);
       }
       return true;
     });
@@ -232,7 +201,7 @@ async function sweepSession(session: Session): Promise<void> {
     await wakeContainer(session);
 
     await withExistingMailboxSession(agentGroup.id, session.id, async (mailbox) => {
-      await maintainSessionMailbox(mailbox, session, agentGroup.id, true, turnCeilingMs);
+      await maintainSessionMailbox(mailbox, session, agentGroup.id, true);
     });
   } catch (err) {
     log.error('Session mailbox sweep failed', {
@@ -248,11 +217,10 @@ async function maintainSessionMailbox(
   session: Session,
   agentGroupId: string,
   justWoke: boolean,
-  turnCeilingMs: number,
 ): Promise<void> {
   const alive = isContainerRunning(session.id);
   if (alive && !justWoke) {
-    enforceRunningContainerSla(mailbox, mailbox, session, agentGroupId, turnCeilingMs);
+    enforceRunningContainerSla(mailbox, mailbox, session, agentGroupId);
   }
   if (!alive) {
     resetStuckProcessingRows(mailbox, mailbox, session, 'container not running');
@@ -301,7 +269,6 @@ function enforceRunningContainerSla(
   outDb: OutboundMailbox,
   session: Session,
   agentGroupId: string,
-  turnCeilingMs: number,
 ): void {
   const decision = decideStuckAction({
     now: Date.now(),
@@ -309,7 +276,6 @@ function enforceRunningContainerSla(
     containerStartedAtMs: getContainerStartedAtMs(session.id),
     containerState: outDb.getContainerState(),
     claims: outDb.getProcessingClaims(),
-    ceilingMs: turnCeilingMs,
   });
 
   if (decision.action === 'ok') return;

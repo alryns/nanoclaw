@@ -481,11 +481,17 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
     isMention: boolean,
     isGroup?: boolean,
   ): Promise<InboundMessage> {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const serialized = message.toJSON() as Record<string, any>;
+    let serialized: Record<string, unknown>;
+    try {
+      serialized = message.toJSON() as unknown as Record<string, unknown>;
+    } catch (err) {
+      log.warn('Failed to serialize inbound chat-sdk message', { err });
+      throw err;
+    }
 
     // Download attachment data before serialization loses fetchData()
     if (message.attachments && message.attachments.length > 0) {
+      log.info('Inbound attachment enrichment started', { count: message.attachments.length });
       const enriched = [];
       for (const att of message.attachments) {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -498,9 +504,15 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
           height: (att as unknown as Record<string, unknown>).height,
         };
         if (att.fetchData) {
+          const startedAt = Date.now();
           try {
             const buffer = await att.fetchData();
             entry.data = buffer.toString('base64');
+            log.info('Inbound attachment download completed', {
+              type: att.type,
+              bytes: buffer.length,
+              elapsedMs: Date.now() - startedAt,
+            });
           } catch (err) {
             log.warn('Failed to download attachment', { type: att.type, err });
           }
@@ -508,6 +520,10 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         enriched.push(entry);
       }
       serialized.attachments = enriched;
+      log.info('Inbound attachment enrichment completed', {
+        count: enriched.length,
+        downloaded: enriched.filter((entry) => typeof entry.data === 'string').length,
+      });
     }
 
     // Recover platform content the Chat SDK omitted, while raw is still here.

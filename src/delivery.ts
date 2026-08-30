@@ -487,7 +487,7 @@ async function deliverMessage(
   // extractAttachmentFiles) — delivery just hands buffers to the adapter.
   const files =
     Array.isArray(content.files) && content.files.length > 0
-      ? readOutboxFiles(session.agent_group_id, session.id, msg.id, content.files as string[])
+      ? await readOutboxFiles(session.agent_group_id, session.id, msg.id, content.files as string[])
       : undefined;
 
   const platformMsgId = await deliveryAdapter.deliver(
@@ -507,7 +507,7 @@ async function deliverMessage(
     fileCount: files?.length,
   });
 
-  clearOutbox(session.agent_group_id, session.id, msg.id);
+  await clearOutbox(session.agent_group_id, session.id, msg.id);
 
   return platformMsgId;
 }

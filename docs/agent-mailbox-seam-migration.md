@@ -14,6 +14,7 @@ rg -n "openInboundDb|withInboundDb|openOutboundDb|openOutboundDbRw" src .claude/
 rg -n "writeSessionMessage|writeSessionRouting|writeOutboundDirect|writeMessageOut|createScheduledTask|restartAgentGroupContainers|createAgentFromTemplate" src .claude/skills container/agent-runner/src
 rg -n "setContainerToolInFlight|clearContainerToolInFlight|clearStaleProcessingAcks|touchHeartbeat|DeliveryActionHandler|PostDeliveryHook" src .claude/skills container/agent-runner/src
 rg -n "(trigger|onWake)\\s*:\\s*[01]\\b|kind\\s*:\\s*string" src .claude/skills container/agent-runner/src
+rg -n "registerAgentMailbox|AgentMailboxFactory|implements AgentMailbox" src .claude/skills
 ```
 
 Imports of the raw helpers from `src/session-manager.ts` require migration.
@@ -58,6 +59,34 @@ Two rules follow from that ownership:
   be durable only once `session()` resolves. The asynchronous writes
   (`insertMessage`, `insertTask`, `writeDirect`) must be durable when their
   own promise resolves — the host wakes containers on the strength of them.
+
+## Implement attachment mounts
+
+Every custom host `AgentMailbox` found by the last detect command must implement
+`attachmentMounts(key)`. Core asks the selected mailbox for the host locations
+that become the container's read-only `/workspace/inbox` and writable
+`/workspace/outbox`; keeping those paths inside `sessionDir()` would silently
+route attachment bytes back to SQLite-era local storage.
+
+Return canonical absolute paths scoped to the requested agent group and
+session. Create both directories before returning, and throw if a required
+FUSE, volume, or other backing mount is unavailable. Do not return credentials,
+an operator workspace, or one shared directory for both sides.
+
+```ts
+async attachmentMounts(key: MailboxSessionKey): Promise<SessionAttachmentMounts> {
+  const sessionRoot = resolveAttachmentSessionRoot(key); // implementation-owned mapping
+  assertBackingMountAvailable(sessionRoot);
+  const inboxHostPath = path.join(sessionRoot, 'inbox');
+  const outboxHostPath = path.join(sessionRoot, 'outbox');
+  fs.mkdirSync(inboxHostPath, { recursive: true });
+  fs.mkdirSync(outboxHostPath, { recursive: true });
+  return { inboxHostPath, outboxHostPath };
+}
+```
+
+Core mounts the returned inbox read-only and the outbox writable at their
+existing container paths.
 
 ## Update custom host modules
 
@@ -146,11 +175,17 @@ cd container/agent-runner && bun test
 
 With the default composition, send a message through a real channel and verify
 that the existing session's `inbound.db` receives it and `outbound.db` receives
-the reply. Re-run the searches above and confirm every affected custom write is
-awaited or deliberately SQLite-only.
+the reply. For each custom mailbox, also verify that an inbound file appears at
+`/workspace/inbox` but cannot be changed by the container, an agent-created file
+appears at `/workspace/outbox`, channel delivery reads it from that selected
+path, and an unavailable backing mount fails the spawn. Re-run the
+searches above and confirm every affected custom write is awaited or
+deliberately SQLite-only.
 
 ## Roll back
 
 No stored-data migration occurs. Return NanoClaw and custom modules to the
 previous revision, rebuild the host and agent image, and restart the service.
-The same SQLite session files remain usable after rollback.
+Remove `attachmentMounts()` only after returning to a revision whose
+`AgentMailbox` interface predates it. The same SQLite session files remain
+usable after rollback.

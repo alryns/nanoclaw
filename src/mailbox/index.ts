@@ -37,6 +37,7 @@ export type {
   ProcessingAck,
   RecurringMessage,
   SessionRouting,
+  SessionAttachmentMounts,
   Task,
   TaskRecord,
   TaskStats,

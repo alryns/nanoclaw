@@ -27,6 +27,7 @@ import {
   clearOutbox,
 } from './session-manager.js';
 import { inboundDbPath, outboundDbPath } from './mailbox/sqlite/paths.js';
+import { getAgentMailbox } from './mailbox/index.js';
 import { getSession, findSession } from './db/sessions.js';
 import type { InboundEvent } from './channels/adapter.js';
 
@@ -60,6 +61,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   await closeDb();
   if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
 });
@@ -89,6 +91,13 @@ describe('session manager', () => {
     const dir = sessionDir('ag-1', 'sess-test');
     expect(fs.existsSync(dir)).toBe(true);
     expect(fs.existsSync(path.join(dir, 'outbox'))).toBe(true);
+    await expect(getAgentMailbox().attachmentMounts({ agentGroupId: 'ag-1', sessionId: 'sess-test' })).resolves.toEqual(
+      {
+        inboxHostPath: path.join(dir, 'inbox'),
+        outboxHostPath: path.join(dir, 'outbox'),
+      },
+    );
+    expect(fs.existsSync(path.join(dir, 'inbox'))).toBe(true);
 
     // Verify inbound.db
     const inPath = inboundDbPath('ag-1', 'sess-test');
@@ -120,7 +129,9 @@ describe('session manager', () => {
     const outside = path.join(TEST_DIR, 'outside.txt');
     fs.writeFileSync(outside, 'outside secret');
 
-    expect(readOutboxFiles('ag-1', 'sess-test', 'msg-1', ['../../../../../outside.txt'])).toBeUndefined();
+    await expect(
+      readOutboxFiles('ag-1', 'sess-test', 'msg-1', ['../../../../../outside.txt']),
+    ).resolves.toBeUndefined();
   });
 
   it('should reject outbound attachment symlinks that escape the message outbox', async () => {
@@ -133,7 +144,7 @@ describe('session manager', () => {
     fs.writeFileSync(outside, 'outside secret');
     fs.symlinkSync('../../../../../outside.txt', path.join(msgOutbox, 'safe-name.txt'));
 
-    expect(readOutboxFiles('ag-1', 'sess-test', 'msg-1', ['safe-name.txt'])).toBeUndefined();
+    await expect(readOutboxFiles('ag-1', 'sess-test', 'msg-1', ['safe-name.txt'])).resolves.toBeUndefined();
   });
 
   it('should not recursively delete outside the outbox for unsafe message ids', async () => {
@@ -142,24 +153,28 @@ describe('session manager', () => {
     fs.mkdirSync(victimDir, { recursive: true });
     fs.writeFileSync(path.join(victimDir, 'keep.txt'), 'do not delete');
 
-    clearOutbox('ag-1', 'sess-test', '../../../../victim-dir');
+    await clearOutbox('ag-1', 'sess-test', '../../../../victim-dir');
 
     expect(fs.existsSync(path.join(victimDir, 'keep.txt'))).toBe(true);
   });
 
   it('should still read and clear normal basename outbox files', async () => {
     initSessionFolder('ag-1', 'sess-test');
-    const dir = sessionDir('ag-1', 'sess-test');
-    const msgOutbox = path.join(dir, 'outbox', 'msg-1');
+    const root = path.join(TEST_DIR, 'selected-attachments');
+    vi.spyOn(getAgentMailbox(), 'attachmentMounts').mockResolvedValue({
+      inboxHostPath: path.join(root, 'inbox'),
+      outboxHostPath: path.join(root, 'outbox'),
+    });
+    const msgOutbox = path.join(root, 'outbox', 'msg-1');
     fs.mkdirSync(msgOutbox, { recursive: true });
     fs.writeFileSync(path.join(msgOutbox, 'result.txt'), 'ok');
 
-    const files = readOutboxFiles('ag-1', 'sess-test', 'msg-1', ['result.txt']);
+    const files = await readOutboxFiles('ag-1', 'sess-test', 'msg-1', ['result.txt']);
     expect(files).toHaveLength(1);
     expect(files?.[0]?.filename).toBe('result.txt');
     expect(files?.[0]?.data.toString()).toBe('ok');
 
-    clearOutbox('ag-1', 'sess-test', 'msg-1');
+    await clearOutbox('ag-1', 'sess-test', 'msg-1');
     expect(fs.existsSync(msgOutbox)).toBe(false);
   });
 
@@ -236,6 +251,11 @@ describe('session manager', () => {
   it('should still save inbound attachments with safe basenames', async () => {
     initSessionFolder('ag-1', 'sess-test');
     const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
+    const root = path.join(TEST_DIR, 'selected-attachments');
+    vi.spyOn(getAgentMailbox(), 'attachmentMounts').mockResolvedValue({
+      inboxHostPath: path.join(root, 'inbox'),
+      outboxHostPath: path.join(root, 'outbox'),
+    });
 
     await writeSessionMessage('ag-1', session.id, {
       id: 'msg-ok',
@@ -247,7 +267,7 @@ describe('session manager', () => {
       }),
     });
 
-    const expected = path.join(sessionDir('ag-1', session.id), 'inbox', 'msg-ok', 'photo.png');
+    const expected = path.join(root, 'inbox', 'msg-ok', 'photo.png');
     expect(fs.existsSync(expected)).toBe(true);
     expect(fs.readFileSync(expected, 'utf-8')).toBe('PNGBYTES');
   });

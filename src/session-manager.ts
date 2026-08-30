@@ -291,8 +291,8 @@ export async function writeSessionMessage(
   // documented reset actually re-provisions instead of killing the chat.
   initSessionFolder(agentGroupId, sessionId);
 
-  // Extract base64 attachment data, save to inbox, replace with file paths
-  const content = extractAttachmentFiles(agentGroupId, sessionId, message.id, message.content);
+  const { inboxHostPath } = await getAgentMailbox().attachmentMounts(mailboxKey(agentGroupId, sessionId));
+  const content = extractAttachmentFiles(message.id, message.content, inboxHostPath);
 
   await withMailboxSession(agentGroupId, sessionId, async (mailbox) => {
     await mailbox.insertMessage({
@@ -335,12 +335,7 @@ export async function writeSessionMessage(
  *   4. `wx` flag on writeFileSync to refuse following a pre-existing symlink
  *      at the target file path or overwriting any existing file.
  */
-function extractAttachmentFiles(
-  agentGroupId: string,
-  sessionId: string,
-  messageId: string,
-  contentStr: string,
-): string {
+function extractAttachmentFiles(messageId: string, contentStr: string, inboxRoot: string): string {
   let parsed: Record<string, unknown>;
   try {
     parsed = JSON.parse(contentStr);
@@ -356,7 +351,6 @@ function extractAttachmentFiles(
     return contentStr;
   }
 
-  const inboxRoot = path.join(sessionDir(agentGroupId, sessionId), 'inbox');
   // Resolved lazily on the first attachment that actually carries bytes, so a
   // message whose attachments have no inline `data` never creates an inbox dir.
   // ensureContainedInboxDir refuses a pre-placed symlink at the inbox root or
@@ -494,18 +488,19 @@ export function writeOutboundDirect(
  * actually on disk — delivery continues without attachments rather than
  * failing the whole message.
  */
-export function readOutboxFiles(
+export async function readOutboxFiles(
   agentGroupId: string,
   sessionId: string,
   messageId: string,
   filenames: string[],
-): OutboundFile[] | undefined {
+): Promise<OutboundFile[] | undefined> {
   if (!isSafeAttachmentName(messageId)) {
     log.warn('Rejecting unsafe outbox message id', { messageId });
     return undefined;
   }
 
-  const outboxDir = path.join(sessionDir(agentGroupId, sessionId), 'outbox', messageId);
+  const { outboxHostPath } = await getAgentMailbox().attachmentMounts(mailboxKey(agentGroupId, sessionId));
+  const outboxDir = path.join(outboxHostPath, messageId);
   if (!fs.existsSync(outboxDir)) return undefined;
 
   let realOutboxDir: string;
@@ -554,21 +549,22 @@ export function readOutboxFiles(
  * delivery caller — the message is already on the user's screen, and a
  * thrown error would trigger the delivery retry path and deliver twice.
  */
-export function clearOutbox(agentGroupId: string, sessionId: string, messageId: string): void {
+export async function clearOutbox(agentGroupId: string, sessionId: string, messageId: string): Promise<void> {
   if (!isSafeAttachmentName(messageId)) {
     log.warn('Rejecting unsafe outbox cleanup message id', { messageId });
     return;
   }
 
-  const outboxDir = path.join(sessionDir(agentGroupId, sessionId), 'outbox', messageId);
-  if (!fs.existsSync(outboxDir)) return;
   try {
+    const { outboxHostPath } = await getAgentMailbox().attachmentMounts(mailboxKey(agentGroupId, sessionId));
+    const outboxDir = path.join(outboxHostPath, messageId);
+    if (!fs.existsSync(outboxDir)) return;
     const stat = fs.lstatSync(outboxDir);
     if (!stat.isDirectory() || stat.isSymbolicLink()) {
       log.warn('Rejecting unsafe outbox cleanup directory', { messageId, outboxDir });
       return;
     }
-    const realOutboxBase = fs.realpathSync(path.join(sessionDir(agentGroupId, sessionId), 'outbox'));
+    const realOutboxBase = fs.realpathSync(outboxHostPath);
     const realOutboxDir = fs.realpathSync(outboxDir);
     if (!isPathInside(realOutboxBase, realOutboxDir)) {
       log.warn('Rejecting outbox cleanup outside session outbox', { messageId, outboxDir });

@@ -35,6 +35,7 @@ import type { ContainerConfig } from './container-config.js';
 import { buildMounts, toMountSpecs } from './container-runner.js';
 import { mountPolicy } from './drivers/index.js';
 import { GROUP_FOLDER_LABEL, validateSpec, type SessionSpec } from './drivers/types.js';
+import { getAgentMailbox } from './mailbox/index.js';
 import type { AgentGroup, Session } from './types.js';
 
 const GROUP_ID = 'ag-mount-composition';
@@ -103,6 +104,35 @@ describe('buildMounts against the policy the drivers enforce', () => {
         '/app/src',
       ]),
     );
+  });
+
+  it('mounts mailbox-selected attachment roots', async () => {
+    const root = path.join(DATA_DIR, 'external-mailbox-attachments', GROUP_ID, SESSION_ID);
+    const selected = vi.spyOn(getAgentMailbox(), 'attachmentMounts').mockResolvedValue({
+      inboxHostPath: path.join(root, 'inbox'),
+      outboxHostPath: path.join(root, 'outbox'),
+    });
+    try {
+      const byPath = new Map((await composedMounts()).map((mount) => [mount.containerPath, mount]));
+      expect(byPath.get('/workspace/inbox')).toMatchObject({ hostPath: path.join(root, 'inbox'), readonly: true });
+      expect(byPath.get('/workspace/outbox')).toMatchObject({ hostPath: path.join(root, 'outbox'), readonly: false });
+    } finally {
+      selected.mockRestore();
+    }
+  });
+
+  it('does not remount attachment roots already covered by the session workspace', async () => {
+    const selected = vi.spyOn(getAgentMailbox(), 'attachmentMounts').mockResolvedValue({
+      inboxHostPath: path.join(sessionDir, 'inbox'),
+      outboxHostPath: path.join(sessionDir, 'outbox'),
+    });
+    try {
+      const byPath = new Map((await composedMounts()).map((mount) => [mount.containerPath, mount]));
+      expect(byPath.has('/workspace/inbox')).toBe(false);
+      expect(byPath.has('/workspace/outbox')).toBe(false);
+    } finally {
+      selected.mockRestore();
+    }
   });
 
   it('classes every mount for a root it actually lives under', async () => {

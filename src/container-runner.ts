@@ -125,6 +125,11 @@ function claimantId(): string {
   return getHostInstanceId() ?? `${os.hostname()}:${process.pid}`;
 }
 
+function pathContains(parent: string, child: string): boolean {
+  const relative = path.relative(path.resolve(parent), path.resolve(child));
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
 /**
  * Claim a session this process is about to run (spawn or adopt). The
  * `session_claims` row is the authority for which process/incarnation owns a
@@ -797,9 +802,31 @@ export async function buildMounts(
   const mounts: VolumeMount[] = [];
   const sessDir = sessionDir(agentGroup.id, session.id);
   const scope = agentGroup.id;
+  const attachmentMounts = await getAgentMailbox().attachmentMounts({
+    agentGroupId: agentGroup.id,
+    sessionId: session.id,
+  });
 
   // Session workspace: mailbox-selected state plus outbox and heartbeat files.
   mounts.push({ hostPath: sessDir, containerPath: '/workspace', readonly: false, mountClass: 'group-state', scope });
+  if (!pathContains(sessDir, attachmentMounts.inboxHostPath)) {
+    mounts.push({
+      hostPath: attachmentMounts.inboxHostPath,
+      containerPath: '/workspace/inbox',
+      readonly: true,
+      mountClass: 'allowlisted-extra',
+      scope,
+    });
+  }
+  if (!pathContains(sessDir, attachmentMounts.outboxHostPath)) {
+    mounts.push({
+      hostPath: attachmentMounts.outboxHostPath,
+      containerPath: '/workspace/outbox',
+      readonly: false,
+      mountClass: 'allowlisted-extra',
+      scope,
+    });
+  }
   mounts.push({
     hostPath: sessionContextPath(agentGroup.id, session.id),
     containerPath: '/app/.nanoclaw-session.json',

@@ -5,11 +5,9 @@ description: Add Slack channel integration via Chat SDK.
 
 # Add Slack Channel
 
-Adds Slack support via the Chat SDK bridge. Trunk ships no channels — this skill
-copies the Slack channel layer (adapter, shared lib, bot-inbound guard,
-provisioning core, container skills) in from the `channels` branch. The **Apply**
-steps carry `nc:` directive fences (an agent applies the prose, a parser the
-directives); all idempotent.
+Adds Slack support via the Chat SDK bridge. This pinned test branch carries the
+Slack channel layer directly; the remaining **Apply** steps register and install
+it idempotently.
 
 This is the base Slack experience: one bot, DM and channel chat. The Slack
 **agents** feature — child bots provisioned from `create_agent`, shared rooms,
@@ -22,23 +20,9 @@ working; that migration is optional).
 
 ## Apply
 
-### 1. Copy the channel payload
+### 1. Channel payload
 
-Fetch the `channels` branch and copy the payload into place (overwrite — the branch is canonical):
-```nc:copy from-branch:channels
-src/channels/slack.ts
-src/channels/slack-lib.ts
-src/channels/slack-lib.test.ts
-src/channels/slack-a2a-guard.ts
-src/channels/slack-a2a-guard.test.ts
-src/channels/slack-raw-text.ts
-src/channels/slack-raw-text.test.ts
-src/channels/slack-registration.test.ts
-src/channels/slack-instances-registration.test.ts
-src/provisioning/slack-app.ts
-src/provisioning/slack-app.test.ts
-container/skills/slack-formatting/SKILL.md
-```
+The channel payload is already present in this pinned test tree.
 
 - **Adapter + shared lib** (`slack.ts`, `slack-lib.ts`): bridge registration, wiring defaults, conversation resolver, the native `SLACK_INSTANCES` loop — pinned by the two registration tests.
 - **Bot-inbound guard** (`slack-a2a-guard.ts`): drops bot-authored inbound at the bridge by default; feature skills register a narrower admission policy on its seam.

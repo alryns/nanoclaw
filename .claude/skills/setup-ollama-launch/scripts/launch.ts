@@ -266,12 +266,15 @@ export async function applyLaunchContainerConfig(
   });
 }
 
-export function hasInstalledOnecli(env: NodeJS.ProcessEnv = process.env): boolean {
+export function hasReusableOnecli(env: NodeJS.ProcessEnv = process.env): boolean {
   const localBin = env.HOME ? path.join(env.HOME, '.local', 'bin') : undefined;
   const searchPath = [localBin, env.PATH].filter((entry): entry is string => Boolean(entry)).join(path.delimiter);
-  const result = spawnSync('onecli', ['version'], { env: { ...env, PATH: searchPath }, stdio: 'ignore' });
-  if (!result.error) return true;
-  return !('code' in result.error && result.error.code === 'ENOENT');
+  const result = spawnSync('onecli', ['agents', 'list'], {
+    env: { ...env, PATH: searchPath },
+    stdio: 'ignore',
+    timeout: 5_000,
+  });
+  return !result.error && result.status === 0;
 }
 
 class LaunchError extends Error {
@@ -564,7 +567,7 @@ async function main(): Promise<number> {
     const docker = spawnSync('docker', ['info'], { stdio: 'ignore' });
     if (docker.error || docker.status !== 0) throw new LaunchError(2, 'Docker is required but is not running');
     runSetupStep('container', [], { ...process.env, DOCKER_BUILDKIT: '1' });
-    runSetupStep('onecli', hasInstalledOnecli() ? ['--reuse'] : []);
+    runSetupStep('onecli', hasReusableOnecli() ? ['--reuse'] : []);
     runSetupStep('mounts', ['--empty']);
   }
 

@@ -27,7 +27,7 @@ import {
   applyLaunchContainerConfig,
   ensureLocalWebOperator,
   ensureWebWiring,
-  hasInstalledOnecli,
+  hasReusableOnecli,
   parseArgs,
   rewriteBaseUrlForContainer,
   runSkillGitCommand,
@@ -250,16 +250,18 @@ describe('Ollama launch contract', () => {
     expect(await getContainerConfig('ag-owner')).toMatchObject({ provider: 'ollama', cli_scope: 'global' });
   });
 
-  it('detects an existing OneCLI without requiring a healthy gateway', () => {
+  it('reuses OneCLI only when its authenticated agent API works', () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoclaw-onecli-'));
     const binDir = path.join(home, '.local', 'bin');
     const binary = path.join(binDir, 'onecli');
     fs.mkdirSync(binDir, { recursive: true });
-    fs.writeFileSync(binary, '#!/bin/sh\nexit 1\n');
+    fs.writeFileSync(binary, '#!/bin/sh\n[ "$1 $2" = "agents list" ]\n');
     fs.chmodSync(binary, 0o755);
     try {
-      expect(hasInstalledOnecli({ HOME: home, PATH: '' })).toBe(true);
-      expect(hasInstalledOnecli({ HOME: path.join(home, 'missing'), PATH: '' })).toBe(false);
+      expect(hasReusableOnecli({ HOME: home, PATH: '' })).toBe(true);
+      fs.writeFileSync(binary, '#!/bin/sh\nexit 1\n');
+      expect(hasReusableOnecli({ HOME: home, PATH: '' })).toBe(false);
+      expect(hasReusableOnecli({ HOME: path.join(home, 'missing'), PATH: '' })).toBe(false);
     } finally {
       fs.rmSync(home, { recursive: true, force: true });
     }

@@ -53,6 +53,23 @@ describe('ClaudeProvider disallowed tools', () => {
     });
   });
 
+  it('lets a provider remove additional built-ins from the SDK and safety hook', async () => {
+    const provider = new ClaudeProvider({ disallowedTools: ['WebSearch', 'WebFetch'] });
+    provider.registerMemorySessionHook(MEMORY_SESSION_HOOK);
+    provider.query({ prompt: 'stay offline', cwd: tmp });
+
+    expect(capturedOptions?.disallowedTools).toEqual(expect.arrayContaining(['WebSearch', 'WebFetch']));
+    expect(capturedOptions?.allowedTools).not.toContain('WebSearch');
+    expect(capturedOptions?.allowedTools).not.toContain('WebFetch');
+
+    const hooks = capturedOptions?.hooks as {
+      PreToolUse: Array<{ hooks: Array<(input: unknown) => Promise<Record<string, unknown>>> }>;
+    };
+    expect(await hooks.PreToolUse[0]!.hooks[0]!({ tool_name: 'WebFetch', tool_input: {} })).toMatchObject({
+      decision: 'block',
+    });
+  });
+
   it('lets a provider stop after an asynchronous tool handoff', async () => {
     class HandoffProvider extends ClaudeProvider {
       protected override shouldStopAfterTool(toolName: string, toolInput: Record<string, unknown>): boolean {
@@ -92,5 +109,23 @@ describe('ClaudeProvider SDK settings passthrough', () => {
     provider.query({ prompt: 'hi', cwd: tmp });
 
     expect(capturedOptions?.settings).toBeUndefined();
+  });
+});
+
+describe('ClaudeProvider tool aliases', () => {
+  it('forwards provider-owned tool redirects to the SDK', () => {
+    const provider = new ClaudeProvider({ toolAliases: { WebFetch: 'mcp__nanoclaw__ollama_web_fetch' } });
+    provider.registerMemorySessionHook(MEMORY_SESSION_HOOK);
+    provider.query({ prompt: 'fetch locally', cwd: tmp });
+
+    expect(capturedOptions?.toolAliases).toEqual({ WebFetch: 'mcp__nanoclaw__ollama_web_fetch' });
+  });
+
+  it('sends no aliases when a provider asks for none', () => {
+    const provider = new ClaudeProvider();
+    provider.registerMemorySessionHook(MEMORY_SESSION_HOOK);
+    provider.query({ prompt: 'hi', cwd: tmp });
+
+    expect(capturedOptions?.toolAliases).toBeUndefined();
   });
 });

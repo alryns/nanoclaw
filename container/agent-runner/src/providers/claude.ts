@@ -239,11 +239,11 @@ function formatTranscriptMarkdown(messages: ParsedMessage[], title?: string | nu
  * script. Defense-in-depth: if SDK_DISALLOWED_TOOLS slips through somehow,
  * block the call here instead of letting the agent hang.
  */
-function createPreToolUseHook(): HookCallback {
+function createPreToolUseHook(disallowedTools: readonly string[]): HookCallback {
   return async (input) => {
     const i = input as { tool_name?: string; tool_input?: Record<string, unknown> };
     const toolName = i.tool_name ?? '';
-    if (SDK_DISALLOWED_TOOLS.includes(toolName)) {
+    if (disallowedTools.includes(toolName)) {
       return {
         decision: 'block',
         stopReason: `Tool '${toolName}' is not available in this environment — use the nanoclaw equivalent.`,
@@ -492,6 +492,14 @@ export interface ClaudeProviderOptions extends ProviderOptions {
    * key must pin it with a runtime guard test.
    */
   settings?: Settings;
+  /**
+   * SDK tool-name redirects. Provider subclasses use this when a built-in
+   * tool name should keep its model-facing contract but execute through a
+   * provider-owned MCP implementation instead.
+   */
+  toolAliases?: Record<string, string>;
+  /** Additional built-ins a provider must remove from the model context. */
+  disallowedTools?: string[];
 }
 
 export class ClaudeProvider implements AgentProvider {
@@ -520,6 +528,8 @@ export class ClaudeProvider implements AgentProvider {
   private effort?: string;
   private fastMode?: boolean;
   private settings?: Settings;
+  private toolAliases: Record<string, string>;
+  private disallowedTools: string[];
   private memorySessionHook?: MemorySessionHookRegistration;
 
   constructor(options: ClaudeProviderOptions = {}) {
@@ -532,6 +542,8 @@ export class ClaudeProvider implements AgentProvider {
     this.effort = options.effort;
     this.fastMode = options.fastMode;
     this.settings = options.settings;
+    this.toolAliases = options.toolAliases ?? {};
+    this.disallowedTools = [...new Set([...SDK_DISALLOWED_TOOLS, ...(options.disallowedTools ?? [])])];
     this.env = {
       ...(options.env ?? {}),
       CLAUDE_CODE_AUTO_COMPACT_WINDOW,
@@ -605,8 +617,11 @@ export class ClaudeProvider implements AgentProvider {
         systemPrompt: instructions
           ? { type: 'preset' as const, preset: 'claude_code' as const, append: instructions }
           : undefined,
-        allowedTools: [...TOOL_ALLOWLIST, ...Object.keys(this.mcpServers).map(mcpAllowPattern)],
-        disallowedTools: SDK_DISALLOWED_TOOLS,
+        allowedTools: [
+          ...TOOL_ALLOWLIST.filter((tool) => !this.disallowedTools.includes(tool)),
+          ...Object.keys(this.mcpServers).map(mcpAllowPattern),
+        ],
+        disallowedTools: this.disallowedTools,
         env: this.env,
         model: this.model,
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -621,9 +636,10 @@ export class ClaudeProvider implements AgentProvider {
         ...(this.settings || this.fastMode
           ? { settings: { ...this.settings, ...(this.fastMode ? { fastMode: true } : {}) } }
           : {}),
+        ...(Object.keys(this.toolAliases).length > 0 ? { toolAliases: this.toolAliases } : {}),
         mcpServers: this.mcpServers,
         hooks: {
-          PreToolUse: [{ hooks: [createPreToolUseHook()] }],
+          PreToolUse: [{ hooks: [createPreToolUseHook(this.disallowedTools)] }],
           PostToolUse: [{ hooks: [createPostToolUseHook((name, input) => this.shouldStopAfterTool(name, input))] }],
           PostToolUseFailure: [{ hooks: [createPostToolUseHook(() => false)] }],
           PreCompact: [{ hooks: [createPreCompactHook(this.assistantName)] }],

@@ -78,9 +78,9 @@ describe('Ollama launch contract', () => {
       fs.mkdirSync(path.join(target, 'copied'), { recursive: true });
       git(target, 'init');
       git(target, 'remote', 'add', 'origin', source);
-      expect(
-        runSkillGitCommand('git fetch origin +refs/heads/providers:refs/remotes/origin/providers', target),
-      ).toBe(false);
+      expect(runSkillGitCommand('git fetch origin +refs/heads/providers:refs/remotes/origin/providers', target)).toBe(
+        false,
+      );
       expect(runSkillGitCommand('git show origin/providers:src/providers/ollama.ts > copied/ollama.ts', target)).toBe(
         true,
       );
@@ -302,14 +302,7 @@ describe('Ollama launch contract', () => {
       message: 'missing value for --model',
     });
     expect(
-      parseArgs([
-        '--model',
-        'qwen3',
-        '--base-url',
-        'http://127.0.0.1:11434',
-        '--web-browsing',
-        'disabled',
-      ]),
+      parseArgs(['--model', 'qwen3', '--base-url', 'http://127.0.0.1:11434', '--web-browsing', 'disabled']),
     ).toMatchObject({
       ok: true,
       value: { model: 'qwen3', runtimeModel: 'qwen3', webBrowsing: 'disabled' },
@@ -318,16 +311,10 @@ describe('Ollama launch contract', () => {
       ok: false,
       message: 'missing required argument: --web-browsing',
     });
-    expect(
-      parseArgs([
-        '--model',
-        'qwen3',
-        '--base-url',
-        'http://127.0.0.1:11434',
-        '--web-browsing',
-        'maybe',
-      ]),
-    ).toEqual({ ok: false, message: '--web-browsing must be enabled or disabled' });
+    expect(parseArgs(['--model', 'qwen3', '--base-url', 'http://127.0.0.1:11434', '--web-browsing', 'maybe'])).toEqual({
+      ok: false,
+      message: '--web-browsing must be enabled or disabled',
+    });
   });
 
   it('stores the source-to-runtime model mapping outside the agent workspace', () => {

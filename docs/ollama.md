@@ -34,8 +34,9 @@ Web browsing is off by default. On first launch, the Ollama CLI offers to enable
 it and clearly states that queries and fetched URLs leave the machine. Enabling
 requires a free Ollama account. The CLI checks whether Ollama Cloud is enabled,
 runs the normal Ollama sign-in flow if needed, and verifies both Web Search and
-Web Fetch before it saves `OLLAMA_WEB_BROWSING=enabled`. Re-run `ollama launch
-nanoclaw --config` to change the choice.
+Web Fetch before handing the result to NanoClaw. NanoClaw saves
+`OLLAMA_WEB_BROWSING=enabled` only after it accepts the launch handoff. Re-run
+`ollama launch nanoclaw --config` to change the choice.
 
 When enabled, both tools are Ollama-owned:
 

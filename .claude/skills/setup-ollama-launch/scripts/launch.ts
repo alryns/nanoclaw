@@ -546,6 +546,13 @@ async function main(): Promise<number> {
   const webPort = configuredWebPort();
   const webUrl = `http://127.0.0.1:${webPort}`;
 
+  // Validate every external Ollama prerequisite before applying skills or
+  // writing launch state. A retry after a failed warm-up must not lose the
+  // fact that newly copied provider/channel code still needs a restart.
+  console.error(`[ollama-launch] warming ${model}`);
+  await warmOllama(baseUrl, runtimeModel);
+  if (contextLength !== undefined) await verifyOllamaContext(baseUrl, runtimeModel, contextLength);
+
   let skillsChanged = false;
   for (const skill of ['add-ollama-provider', 'add-local-web-chat']) {
     skillsChanged = (await applyBundledSkill(skill)) || skillsChanged;
@@ -560,12 +567,6 @@ async function main(): Promise<number> {
     runSetupStep('onecli', hasInstalledOnecli() ? ['--reuse'] : []);
     runSetupStep('mounts', ['--empty']);
   }
-
-  // Validate the model before persisting launch state. Browsing was already
-  // verified through Ollama's local endpoints by the CLI before this handoff.
-  console.error(`[ollama-launch] warming ${model}`);
-  await warmOllama(baseUrl, runtimeModel);
-  if (contextLength !== undefined) await verifyOllamaContext(baseUrl, runtimeModel, contextLength);
 
   const previousBaseUrl = readEnvFile(['OLLAMA_BASE_URL']).OLLAMA_BASE_URL;
   const previousWebBrowsing = readEnvFile(['OLLAMA_WEB_BROWSING']).OLLAMA_WEB_BROWSING;

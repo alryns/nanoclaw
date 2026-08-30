@@ -55,7 +55,8 @@ not repeat it.
 
 The Ollama CLI owns the browsing consent, sign-in, cloud-status check, and live
 Web Search/Web Fetch probes. The launcher accepts only the verified
-`enabled|disabled` result and persists it for the host provider. Browsing calls
+`enabled|disabled` result; NanoClaw persists it for the host provider only after
+the launch handoff succeeds. Browsing calls
 still go through the local Ollama daemon; NanoClaw neither receives nor stores an
 Ollama API key. Re-run `ollama launch nanoclaw --config` to change the choice.
 

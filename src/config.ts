@@ -19,7 +19,7 @@ const envConfig = readEnvFile([
   'NANOCLAW_EGRESS_LOCKDOWN',
   'NANOCLAW_EGRESS_NETWORK',
   'ONECLI_GATEWAY_CONTAINER',
-  'NANOCLAW_TURN_CEILING_MS',
+  'NANOCLAW_IDLE_TIMEOUT_MS',
 ]);
 
 /**
@@ -97,10 +97,12 @@ export const EGRESS_NETWORK =
   process.env.NANOCLAW_EGRESS_NETWORK || envConfig.NANOCLAW_EGRESS_NETWORK || 'nanoclaw-egress';
 export const ONECLI_GATEWAY_CONTAINER =
   process.env.ONECLI_GATEWAY_CONTAINER || envConfig.ONECLI_GATEWAY_CONTAINER || 'onecli';
-// Install-wide override for the host sweep's absolute turn ceiling, in ms.
+// Install-wide override for the host sweep's idle timeout, in ms: how long a
+// running container may emit no output and make no tool calls before it is
+// killed. Not a limit on how long a turn may take.
 // Raw string here; parsed + validated where it is consumed (host-sweep.ts),
 // so an invalid value falls back to the built-in default instead of NaN.
-export const TURN_CEILING_MS_RAW = process.env.NANOCLAW_TURN_CEILING_MS || envConfig.NANOCLAW_TURN_CEILING_MS || '';
+export const IDLE_TIMEOUT_MS_RAW = process.env.NANOCLAW_IDLE_TIMEOUT_MS || envConfig.NANOCLAW_IDLE_TIMEOUT_MS || '';
 
 // Timezone for scheduled tasks, message formatting, etc.
 // Validates each candidate is a real IANA identifier before accepting.

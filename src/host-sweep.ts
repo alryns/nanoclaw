@@ -12,12 +12,14 @@
  *   tries++. Existing retry machinery does the rest.
  *
  *   If the container IS running:
- *     1. Absolute ceiling: heartbeat age > max(turn ceiling, current_bash_timeout)
- *        where the turn ceiling is 30 min unless NANOCLAW_TURN_CEILING_MS
- *        raises it
- *        → kill. Covers the "alive but silent for 30 min" case. Extended
- *        only while Bash is declared as running longer, honouring the
- *        user's own timeout directive. Kill then resets processing rows.
+ *     1. Idle timeout: heartbeat age > max(idle timeout, current_bash_timeout)
+ *        where the idle timeout is 30 min unless NANOCLAW_IDLE_TIMEOUT_MS
+ *        raises it → kill. The heartbeat is touched on every stream event, so
+ *        this measures silence — no output and no tool calls — not elapsed
+ *        turn time; a turn that keeps producing is never killed here, however
+ *        long it runs. Extended only while Bash is declared as running longer,
+ *        honouring the user's own timeout directive. Kill then resets
+ *        processing rows.
  *        When no heartbeat file exists yet, falls back to the tracked
  *        container spawn time so a container that goes idle without ever
  *        reaching an SDK event —
@@ -33,8 +35,8 @@
 import fs from 'fs';
 
 import { ensureEgressNetwork } from './egress-lockdown.js';
-import { TURN_CEILING_MS_RAW } from './config.js';
-import { resolveTurnCeilingMs } from './turn-ceiling.js';
+import { IDLE_TIMEOUT_MS_RAW } from './config.js';
+import { resolveIdleTimeoutMs } from './idle-timeout.js';
 import { getActiveSessions, isTaskThread, updateSession } from './db/sessions.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { log } from './log.js';
@@ -44,14 +46,17 @@ import type { Session } from './types.js';
 import type { ContainerState, InboundMailbox, OutboundMailbox } from './mailbox/index.js';
 
 const SWEEP_INTERVAL_MS = 60_000;
-// Absolute idle ceiling for a running container. If the heartbeat file hasn't
-// been touched in this long, the container is either stuck or doing genuinely
+// How long a running container may go with no output and no tool calls before
+// it is killed. The heartbeat file is touched on every stream event, so this
+// times silence, not turn length: a turn still producing tokens or calling
+// tools never trips it, however long it takes. If nothing has touched the
+// heartbeat in this long the container is either stuck or doing genuinely
 // nothing — kill and restart on the next inbound. 30 minutes unless
-// NANOCLAW_TURN_CEILING_MS raises it, because a slow local-model backend can
+// NANOCLAW_IDLE_TIMEOUT_MS raises it, because a slow local-model backend can
 // legitimately go longer than 30 min between stream events while actively
 // decoding (#3643). Read once at startup: changing it needs a host restart,
 // like every other env var.
-export const ABSOLUTE_CEILING_MS = resolveTurnCeilingMs(TURN_CEILING_MS_RAW);
+export const IDLE_TIMEOUT_MS = resolveIdleTimeoutMs(IDLE_TIMEOUT_MS_RAW);
 // Stuck tolerance window applied per 'processing' claim — "did we see any
 // signs of life since this message was claimed?"
 export const CLAIM_STUCK_MS = 60 * 1000;
@@ -60,7 +65,7 @@ const BACKOFF_BASE_MS = 5000;
 
 export type StuckDecision =
   | { action: 'ok' }
-  | { action: 'kill-ceiling'; heartbeatAgeMs: number; ceilingMs: number }
+  | { action: 'kill-idle-timeout'; heartbeatAgeMs: number; idleTimeoutMs: number }
   | { action: 'kill-claim'; messageId: string; claimAgeMs: number; toleranceMs: number };
 
 /**
@@ -78,7 +83,7 @@ export function decideStuckAction(args: {
   const { now, heartbeatMtimeMs, containerStartedAtMs, containerState, claims } = args;
   const declaredBashMs = bashTimeoutMs(containerState);
 
-  // Ceiling check prefers the heartbeat file's mtime. A freshly-spawned
+  // Idle-timeout check prefers the heartbeat file's mtime. A freshly-spawned
   // container hasn't had any SDK activity yet so no heartbeat file exists —
   // if we treated that as infinitely stale we'd kill every container within
   // seconds of spawn. But "no heartbeat file" isn't only a spawn-grace-period
@@ -97,9 +102,9 @@ export function decideStuckAction(args: {
   const effectiveHeartbeatMs = heartbeatMtimeMs !== 0 ? heartbeatMtimeMs : (containerStartedAtMs ?? 0);
   if (effectiveHeartbeatMs !== 0) {
     const heartbeatAge = now - effectiveHeartbeatMs;
-    const ceiling = Math.max(ABSOLUTE_CEILING_MS, declaredBashMs ?? 0);
-    if (heartbeatAge > ceiling) {
-      return { action: 'kill-ceiling', heartbeatAgeMs: heartbeatAge, ceilingMs: ceiling };
+    const idleTimeout = Math.max(IDLE_TIMEOUT_MS, declaredBashMs ?? 0);
+    if (heartbeatAge > idleTimeout) {
+      return { action: 'kill-idle-timeout', heartbeatAgeMs: heartbeatAge, idleTimeoutMs: idleTimeout };
     }
   }
 
@@ -280,14 +285,14 @@ function enforceRunningContainerSla(
 
   if (decision.action === 'ok') return;
 
-  if (decision.action === 'kill-ceiling') {
-    log.warn('Killing container past absolute ceiling', {
+  if (decision.action === 'kill-idle-timeout') {
+    log.warn('Killing container — no output or tool calls past the idle timeout', {
       sessionId: session.id,
       heartbeatAgeMs: decision.heartbeatAgeMs,
-      ceilingMs: decision.ceilingMs,
+      idleTimeoutMs: decision.idleTimeoutMs,
     });
-    killContainer(session.id, 'absolute-ceiling');
-    resetStuckProcessingRows(inDb, outDb, session, 'absolute-ceiling');
+    killContainer(session.id, 'idle-timeout');
+    resetStuckProcessingRows(inDb, outDb, session, 'idle-timeout');
     return;
   }
 

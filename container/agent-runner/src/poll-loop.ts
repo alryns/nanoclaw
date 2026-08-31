@@ -28,6 +28,11 @@ import {
   type RoutingContext,
 } from './formatter.js';
 import { stripHarnessTagArtifacts } from './harness-tag-strip.js';
+import {
+  classifyGatewayProviderBlock,
+  gatewayProviderBlockMessage,
+  type GatewayProviderBlock,
+} from './providers/gateway-block.js';
 import { isUploadTraceCommand, uploadTrace } from './upload-trace.js';
 import type { AgentProvider, AgentQuery, ProviderEvent, ProviderExchange } from './providers/types.js';
 
@@ -260,7 +265,8 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
       }
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
-      log(`Query error: ${errMsg}`);
+      const gatewayBlock = classifyGatewayProviderBlock(errMsg);
+      log(gatewayBlock ? `Provider request blocked (${gatewayBlock})` : `Query error: ${errMsg}`);
 
       // Stale/corrupt continuation recovery: ask the provider whether
       // this error means the stored continuation is unusable, and clear
@@ -271,15 +277,20 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         clearContinuation(config.providerName);
       }
 
-      // Write error response so the user knows something went wrong
-      await writeMessageOut({
-        id: generateId(),
-        kind: 'chat',
-        platform_id: routing.platformId,
-        channel_type: routing.channelType,
-        thread_id: routing.threadId,
-        content: JSON.stringify({ text: `Error: ${errMsg}` }),
-      });
+      // Write error response so the user knows something went wrong. Gateway
+      // blocks use the same local safe-message path as terminal result events.
+      if (gatewayBlock) {
+        await deliverGatewayProviderBlock(gatewayBlock, routing);
+      } else {
+        await writeMessageOut({
+          id: generateId(),
+          kind: 'chat',
+          platform_id: routing.platformId,
+          channel_type: routing.channelType,
+          thread_id: routing.threadId,
+          content: JSON.stringify({ text: `Error: ${errMsg}` }),
+        });
+      }
 
       // The batch is still acked completed below (no redelivery). Without
       // this line the only log trace of the errored turn is "Query error"
@@ -555,6 +566,25 @@ export async function processQuery(
         // at all — either way the turn is finished.
         markCompleted(initialBatchIds);
         if (event.text) {
+          const gatewayBlock = event.isError === true ? classifyGatewayProviderBlock(event.text) : null;
+          if (gatewayBlock) {
+            const blockedPrompt = archivePrompts.shift();
+            if (blockedPrompt !== undefined) {
+              await deliverGatewayProviderBlock(gatewayBlock, routing);
+              notifyExchangeComplete(onExchangeComplete, {
+                prompt: blockedPrompt,
+                result: gatewayProviderBlockMessage(gatewayBlock),
+                continuation: queryContinuation ?? initialContinuation,
+                status: 'error',
+              });
+            } else {
+              log(`Ignoring duplicate ${gatewayBlock} terminal result with no pending prompt`);
+            }
+            midTurnSent = 0;
+            turnStartSeq = maxOutboundSeq();
+            midTurnTail = '';
+            continue;
+          }
           const { sent, hasUnwrapped, taskBlocks, resultBlocks } = await dispatchResultText(event.text, routing, {
             midTurnSent,
             // For emitsMidTurnText providers the result door NEVER delivers
@@ -677,7 +707,14 @@ function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
       log(`Session: ${event.continuation}`);
       break;
     case 'result':
-      log(`Result: ${event.text ? event.text.slice(0, 200) : '(empty)'}`);
+      {
+        const gatewayBlock = event.isError === true ? classifyGatewayProviderBlock(event.text) : null;
+        log(
+          gatewayBlock
+            ? `Provider request blocked (${gatewayBlock})`
+            : `Result: ${event.text ? event.text.slice(0, 200) : '(empty)'}`,
+        );
+      }
       break;
     case 'error':
       log(
@@ -690,12 +727,25 @@ function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
   }
 }
 
+async function deliverGatewayProviderBlock(reason: GatewayProviderBlock, routing: RoutingContext): Promise<void> {
+  log(`Writing local ${reason} notice to outbound mailbox`);
+  await writeMessageOut({
+    id: generateId(),
+    in_reply_to: routing.inReplyTo,
+    kind: 'chat',
+    platform_id: routing.platformId,
+    channel_type: routing.channelType,
+    thread_id: routing.threadId,
+    content: JSON.stringify({ text: gatewayProviderBlockMessage(reason) }),
+  });
+}
+
 /**
  * Deliver a turn's text straight to the channel the batch arrived on. Used when
- * a turn ends in a provider error (e.g. a non-retryable 403 billing_error) with
- * no <message> envelope: the notice would otherwise be dropped as scratchpad.
- * This is the same user-facing write the outer catch block does, minus the
- * `Error:` prefix — the provider's text is already a user-facing message.
+ * a turn ends in an unclassified provider error (e.g. a non-retryable billing
+ * error) with no <message> envelope: the notice would otherwise be dropped as
+ * scratchpad. Recognized Gateway blocks take the local safe-message path above
+ * and never reach this function.
  */
 async function deliverErrorResult(text: string, routing: RoutingContext): Promise<void> {
   log('Error result with no <message> envelope — delivering to channel');

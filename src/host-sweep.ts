@@ -4,8 +4,10 @@
  * Reads runner-owned processing/container state and maintains host-owned
  * inbound state through the registered mailbox.
  *
- * Stuck / idle detection (replaces the old IDLE_TIMEOUT setTimeout + 10-min
- * heartbeat threshold):
+ * Stuck / idle detection (replaces v1's keep-alive `IDLE_TIMEOUT` setTimeout
+ * + 10-min heartbeat threshold — note that v1's IDLE_TIMEOUT was the
+ * opposite mechanism, holding a container open after its last result;
+ * the idle timeout here decides when to kill one):
  *
  *   If the container isn't running and there are 'processing' rows left over
  *   (e.g. it crashed mid-turn) → reset them to pending with backoff +
@@ -36,7 +38,7 @@ import fs from 'fs';
 
 import { ensureEgressNetwork } from './egress-lockdown.js';
 import { IDLE_TIMEOUT_MS_RAW } from './config.js';
-import { resolveIdleTimeoutMs } from './idle-timeout.js';
+import { MAX_IDLE_TIMEOUT_MS, MIN_IDLE_TIMEOUT_MS, parseIdleTimeoutMs, resolveIdleTimeoutMs } from './idle-timeout.js';
 import { getActiveSessions, isTaskThread, updateSession } from './db/sessions.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { log } from './log.js';
@@ -57,6 +59,10 @@ const SWEEP_INTERVAL_MS = 60_000;
 // decoding (#3643). Read once at startup: changing it needs a host restart,
 // like every other env var.
 export const IDLE_TIMEOUT_MS = resolveIdleTimeoutMs(IDLE_TIMEOUT_MS_RAW);
+// The operator's explicit setting, or undefined when they set nothing valid.
+// Kept apart from IDLE_TIMEOUT_MS so the claim-stuck tolerance below can honour
+// a deliberate override without the built-in default silently widening it.
+export const IDLE_TIMEOUT_OVERRIDE_MS = parseIdleTimeoutMs(IDLE_TIMEOUT_MS_RAW);
 // Stuck tolerance window applied per 'processing' claim — "did we see any
 // signs of life since this message was claimed?"
 export const CLAIM_STUCK_MS = 60 * 1000;
@@ -108,7 +114,15 @@ export function decideStuckAction(args: {
     }
   }
 
-  const tolerance = Math.max(CLAIM_STUCK_MS, declaredBashMs ?? 0);
+  // An operator who raises the idle timeout is telling us this backend goes
+  // quiet for longer. That applies to a claimed message just as much as to the
+  // heartbeat — in fact more so, because the heartbeat is only touched from
+  // inside the provider's stream loop, so a backend still doing prompt
+  // processing has claimed the message and written no heartbeat at all. Left
+  // at a flat 60s this check would kill exactly the containers the raised
+  // timeout was meant to protect. Only the explicit override counts, so an
+  // install that sets nothing keeps the original 60s tolerance untouched.
+  const tolerance = Math.max(CLAIM_STUCK_MS, declaredBashMs ?? 0, IDLE_TIMEOUT_OVERRIDE_MS ?? 0);
   for (const claim of claims) {
     const claimedAt = Date.parse(claim.statusChanged);
     if (Number.isNaN(claimedAt)) continue;
@@ -126,6 +140,18 @@ let running = false;
 export function startHostSweep(): void {
   if (running) return;
   running = true;
+  // Say so when an operator set the var and we threw their value away. Falling
+  // back silently is the safe behaviour, but a bad value otherwise looks
+  // identical to no value: containers keep dying at 30 minutes and nothing in
+  // the log explains why. Warned here rather than at module scope so importing
+  // the sweep stays side-effect-free.
+  if (IDLE_TIMEOUT_MS_RAW && IDLE_TIMEOUT_OVERRIDE_MS === undefined) {
+    log.warn('Ignoring invalid NANOCLAW_IDLE_TIMEOUT_MS', {
+      value: IDLE_TIMEOUT_MS_RAW,
+      usingMs: IDLE_TIMEOUT_MS,
+      allowedRangeMs: [MIN_IDLE_TIMEOUT_MS, MAX_IDLE_TIMEOUT_MS],
+    });
+  }
   void sweep();
 }
 

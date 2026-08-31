@@ -21,19 +21,29 @@
 
 // Default silence a running container is allowed before it is killed (30 min).
 export const DEFAULT_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
-// Anything below the sweep interval + claim tolerance would kill containers
-// on their first quiet tick; refuse timeouts shorter than one minute.
-export const MIN_IDLE_TIMEOUT_MS = 60 * 1000;
+// The sweep runs every 60s and tolerates a claimed message for 60s, so a
+// timeout below the sum of the two can kill a container on its first quiet
+// tick no matter how healthy it is. Refuse anything under that.
+export const MIN_IDLE_TIMEOUT_MS = 2 * 60 * 1000;
+// A timeout this long is indistinguishable from having no stuck detection at
+// all: a genuinely hung container would hold its session, its claim and its
+// container resources for a day. Refuse it rather than silently disabling the
+// sweep's only backstop.
+export const MAX_IDLE_TIMEOUT_MS = 24 * 60 * 60 * 1000;
 
 /**
  * Parse the raw env value into ms. Returns undefined for anything that is not
- * a finite integer >= MIN_IDLE_TIMEOUT_MS, so a typo'd env var falls back to
- * the default instead of disabling the timeout or collapsing it to NaN.
+ * a safe integer within [MIN, MAX], so a typo'd env var falls back to the
+ * default instead of disabling the timeout or collapsing it to NaN. Callers
+ * that want the operator told about a rejected value should compare this
+ * against the raw string themselves — parsing stays silent so it can be used
+ * from anywhere.
  */
 export function parseIdleTimeoutMs(raw: unknown): number | undefined {
   if (raw === null || raw === undefined || raw === '') return undefined;
   const n = typeof raw === 'number' ? raw : Number(String(raw).trim());
-  if (!Number.isInteger(n) || n < MIN_IDLE_TIMEOUT_MS) return undefined;
+  if (!Number.isSafeInteger(n)) return undefined;
+  if (n < MIN_IDLE_TIMEOUT_MS || n > MAX_IDLE_TIMEOUT_MS) return undefined;
   return n;
 }
 

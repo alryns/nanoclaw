@@ -23,18 +23,23 @@ function routing() {
 }
 
 /**
- * Actions the bridge will drop: send_card is fire-and-forget, so only
- * `url` actions survive as link buttons (src/channels/chat-sdk-bridge.ts,
- * "Non-URL actions are dropped"). Counted here so the agent is told, instead
+ * Actions the bridge will drop: send_card is fire-and-forget, so only actions
+ * with a non-empty `label` and `url` survive as link buttons
+ * (src/channels/chat-sdk-bridge.ts). Counted here so the agent is told instead
  * of assuming the platform cannot render buttons.
  */
-function countCallbackActions(card: Record<string, unknown>): number {
+function countDroppedActions(card: Record<string, unknown>): number {
   const actions = card.actions;
   if (!Array.isArray(actions)) return 0;
   return actions.filter((a) => {
     if (!a || typeof a !== 'object') return true;
-    const url = (a as Record<string, unknown>).url;
-    return !(typeof url === 'string' && url);
+    const action = a as Record<string, unknown>;
+    return !(
+      typeof action.label === 'string' &&
+      action.label.length > 0 &&
+      typeof action.url === 'string' &&
+      action.url.length > 0
+    );
   }).length;
 }
 
@@ -148,14 +153,45 @@ export const askUserQuestion: McpToolDefinition = {
 export const sendCard: McpToolDefinition = {
   tool: {
     name: 'send_card',
-    description: 'Send a structured card (interactive or display-only) to the current conversation.',
+    description: 'Send a display card with optional URL link buttons to the current conversation.',
     inputSchema: {
       type: 'object' as const,
       properties: {
         card: {
           type: 'object',
           description:
-            'Card structure with title, description, and optional children/actions. Actions need a url and render as link buttons; actions without a url are dropped on every channel. For clickable buttons use ask_user_question.',
+            'Display card with optional title, description, text children, and URL link actions. Each action requires a non-empty label and url; invalid actions are dropped. Callback buttons are unsupported; use ask_user_question for choices.',
+          properties: {
+            title: { type: 'string' },
+            description: { type: 'string' },
+            children: {
+              type: 'array',
+              description:
+                'Text content only: strings or objects with a text field. Nested action blocks are unsupported.',
+              items: {
+                anyOf: [
+                  { type: 'string' },
+                  {
+                    type: 'object',
+                    properties: { text: { type: 'string' } },
+                    required: ['text'],
+                  },
+                ],
+              },
+            },
+            actions: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  label: { type: 'string', minLength: 1 },
+                  url: { type: 'string', minLength: 1 },
+                  style: { type: 'string', enum: ['primary', 'danger', 'default'] },
+                },
+                required: ['label', 'url'],
+              },
+            },
+          },
         },
         fallbackText: {
           type: 'string',
@@ -183,10 +219,10 @@ export const sendCard: McpToolDefinition = {
     });
 
     log(`send_card: ${id}`);
-    const dropped = countCallbackActions(card);
+    const dropped = countDroppedActions(card);
     if (dropped > 0) {
       return ok(
-        `Card sent (id: ${id}). ${dropped} action(s) without a url were dropped: send_card never renders callback buttons on any channel. Use ask_user_question for buttons.`,
+        `Card sent (id: ${id}). ${dropped} invalid action(s) were dropped: send_card link actions require both a non-empty label and url. Use ask_user_question for callback buttons.`,
       );
     }
     return ok(`Card sent (id: ${id})`);

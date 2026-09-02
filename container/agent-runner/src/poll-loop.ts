@@ -8,12 +8,12 @@ import {
   type MessageInRow,
 } from './db/messages-in.js';
 import {
-  getDeliveredSeqSince,
   getDeliveriesSince,
   getMaxOutboundSeq,
   getUndeliveredMessages,
   sameDestination,
   writeMessageOut,
+  type Delivery,
 } from './db/messages-out.js';
 import { clearStaleProcessingAcks } from './db/container-state.js';
 import { touchHeartbeat } from './heartbeat.js';
@@ -249,8 +249,10 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     const skippedSet = new Set(skipped.map((s) => s.id));
     const processingIds = ids.filter((id) => !commandIds.includes(id) && !skippedSet.has(id));
     // Publish the batch's in_reply_to so MCP tools (send_message, send_file)
-    // can stamp it on outbound rows — needed for a2a return-path routing.
-    setCurrentInReplyTo(routing.inReplyTo);
+    // can stamp it on outbound rows — needed for a2a return-path routing, and
+    // read back by tools-only reconciliation to attribute a send to the
+    // request it answers.
+    setCurrentInReplyTo(toolStampFor(keep));
     // Forward a loop stop to the ACTIVE query. The stream deliberately stays
     // open between turns, so the loop can be parked inside processQuery when
     // config.signal fires; without this, the "stopped" loop's query — and its
@@ -367,9 +369,16 @@ interface QueryResult {
  * but never worth writing to, since an agent channel has no human endpoint and
  * unsolicited output there feeds straight back into an agent loop.
  */
-interface OutstandingReply {
+export interface OutstandingReply {
   target?: ReplyTarget;
   nudged: boolean;
+  /**
+   * Push ordinal of the prompt that carries this request — the prompt it
+   * arrived in, or, once corrected, the correction — and so the exchange at
+   * whose result it may first be judged (see `promptsPushed` / `resultsSeen`
+   * in processQuery).
+   */
+  exchange: number;
 }
 
 export async function processQuery(
@@ -408,8 +417,91 @@ export async function processQuery(
   // one out never spends or discards another's, and a busy channel can neither
   // postpone an answer forever nor collapse two questions into one placeholder.
   const outstanding: OutstandingReply[] = [];
+  // Every request this query has ever held on the hook — still open or already
+  // settled. Reconciliation attributes a row stamped for one of them to THAT
+  // request and nothing else (a send_file after the send_message that paid it
+  // off, a stamp a tool read before a follow-up refresh), so a late row for a
+  // settled request can never fall through to the address match and settle
+  // somebody else's question. Filled by settleDeliveries.
+  const knownRequests = new Map<string, KnownRequest>();
   // Delivered-seq as of the last judgment. Anything above it is this span's work.
   let lastJudgedSeq = getMaxOutboundSeq();
+  // ── Exchange bookkeeping ──
+  // Prompts enter the provider in push order and every 'result' event answers
+  // the oldest unanswered prompt, so a prompt's push ordinal identifies its
+  // exchange: the opening prompt is exchange 0, each pushPrompt() takes the
+  // next ordinal, and the n-th result belongs to exchange n. A request is
+  // judged (correction, placeholder) only at a result whose exchange is at or
+  // past the prompt that carries it. Live-observed otherwise: a follow-up
+  // pushed while the previous turn was live was judged dry at THAT turn's
+  // result, before its own prompt had run, and the queued correction made
+  // the model send the reply twice. A row stamped for a queued request
+  // settles it whenever it appears; matching by address is gated the same
+  // way as judging (see settleDeliveries). `promptsPushed` only moves
+  // through pushPrompt(), so ordinal and push cannot drift apart. The model
+  // rests on one 'result' per prompt; a provider that ever answered two
+  // queued prompts with one result would put every later judgment and
+  // stamp one exchange off, which the log line in the result handler and
+  // at query end reports rather than hides.
+  let promptsPushed = 1;
+  let resultsSeen = 0;
+  // What each exchange's tool sends must carry: the `current_in_reply_to`
+  // stamp send_message / send_file read from session_state, and whether the
+  // exchange opens a new turn (a follow-up batch, a tools-only correction —
+  // the tools' per-turn send budget restarts) or continues the one in
+  // progress (an envelope retry, which has no tool budget to restart). Exchange
+  // 0 is what runPollLoop published before the query started. An exchange's
+  // stamp is published only when the provider actually starts running it: at
+  // push time if the provider is idle, otherwise at the result that ends the
+  // exchange ahead of it. Live-observed otherwise: a follow-up pushed during
+  // a live turn re-pointed the stamp at once, so a send the LIVE turn made
+  // after the push carried the queued request's id — the exact-stamp match
+  // then paid off the queued request and the live one was never settled.
+  // Each record also keeps the user prompt the exchange answers, which the
+  // exchange hook reports: a correction or retry answers the prompt of the
+  // exchange it retries, never its own nudge text.
+  interface Exchange {
+    stamp: string | null;
+    newTurn: boolean;
+    prompt: string;
+    handedOver: boolean;
+  }
+  const exchanges = new Map<number, Exchange>([
+    [0, { stamp: stampForRouting(routing), newTurn: true, prompt: initialPrompt, handedOver: true }],
+  ]);
+  const stampOf = (exchange: number): string | null => exchanges.get(exchange)?.stamp ?? null;
+  const promptOf = (exchange: number): string => exchanges.get(exchange)?.prompt ?? initialPrompt;
+  const handOver = (exchange: number): void => {
+    const next = exchanges.get(exchange);
+    if (!next || next.handedOver) return;
+    next.handedOver = true;
+    setCurrentInReplyTo(next.stamp);
+    // A new turn moves the tools' view of the boundary with it; an envelope
+    // retry continues the turn already in progress and keeps its budget.
+    if (next.newTurn) setTurnOutboundBaseline(getMaxOutboundSeq());
+  };
+  // Seqs of rows this loop wrote itself (placeholders, error notices). They
+  // are skipped by settling rather than jumped over with the baseline: a
+  // tool row the next exchange commits while a placeholder write is awaited
+  // would otherwise sit below the advanced baseline and never be settled.
+  const loopWritten = new Set<number>();
+
+  /**
+   * The one way a prompt enters the provider after the opening one. Takes the
+   * next exchange ordinal, records what that exchange's tool sends must carry,
+   * and — only if the provider is idle, i.e. every pushed prompt already has
+   * its result — publishes it now, because the provider starts this prompt
+   * immediately. While a turn is live the stamp stays with the live exchange;
+   * the result handler hands over once this prompt becomes current. Returns
+   * the ordinal.
+   */
+  const pushPrompt = (text: string, stamp: string | null, newTurn: boolean, prompt: string): number => {
+    const exchange = promptsPushed++;
+    exchanges.set(exchange, { stamp, newTurn, prompt, handedOver: false });
+    if (resultsSeen === exchange) handOver(exchange);
+    query.push(text);
+    return exchange;
+  };
 
   /**
    * Record what a batch put on the hook: one entry per waiting person, each
@@ -417,12 +509,12 @@ export async function processQuery(
    * contributes a single targetless entry instead — one correspondent, however
    * many notices arrived in the batch.
    */
-  const trackOutstanding = (targets: ReplyTarget[], agentWake: boolean): void => {
-    for (const target of targets) outstanding.push({ target, nudged: false });
-    if (targets.length === 0 && agentWake) outstanding.push({ nudged: false });
+  const trackOutstanding = (targets: ReplyTarget[], agentWake: boolean, exchange: number): void => {
+    for (const target of targets) outstanding.push({ target, nudged: false, exchange });
+    if (targets.length === 0 && agentWake) outstanding.push({ nudged: false, exchange });
   };
 
-  trackOutstanding(routing.replyTargets ?? [], routing.agentWake === true);
+  trackOutstanding(routing.replyTargets ?? [], routing.agentWake === true, 0);
   // Once-per-turn guard for the task-run "<message> block was not delivered"
   // nudge — mirrors unwrappedNudged for chat turns.
   let taskBlockNudged = false;
@@ -456,11 +548,6 @@ export async function processQuery(
   // never re-matched. Dropped at the turn boundary: a block that never
   // closes anywhere is the wrap-nudge's job, not the buffer's.
   let midTurnTail = '';
-  // Prompt queue for the exchange hook — each result event consumes the
-  // oldest unanswered prompt, except a wrapping-retry result, which answers
-  // the same prompt again. Unused (and unmaintained) when the provider
-  // doesn't implement `onExchangeComplete`.
-  const archivePrompts: string[] = [initialPrompt];
 
   // Concurrent polling: push follow-ups into the active query as they arrive.
   // We do NOT force-end the stream on silence — keeping the query open avoids
@@ -550,20 +637,22 @@ export async function processQuery(
         log(`Pushing ${keep.length} follow-up message(s) into active query`);
         unwrappedNudged = false;
         taskBlockNudged = false;
-        const outboundBaselineSeq = getMaxOutboundSeq();
-        // A follow-up batch is a new turn, so the tools' view of the boundary
-        // moves with it. Correction and nudge pushes deliberately do not touch
-        // this: those continue the turn already in progress.
-        setTurnOutboundBaseline(outboundBaselineSeq);
+        // A follow-up batch is a new turn: its tool sends must carry ITS
+        // request id (tools-only reconciliation matches the stamp against
+        // the follow-up's reply target; the a2a return path resolves the
+        // origin session from it), and the tools' view of the turn boundary
+        // moves with it. The envelope door already attributes a block to the
+        // latest inbound row on its channel; this keeps the tool door on the
+        // same policy. pushPrompt decides WHEN: now if the provider is idle,
+        // else when the live turn's result hands over — a stamp re-pointed
+        // mid-turn would land on the live turn's own late sends.
+        const exchange = pushPrompt(prompt, toolStampFor(keep), true, prompt);
         // A follow-up puts its own correspondent on the hook, queued behind any
         // already waiting. The queue and the judged-seq mark deliberately
         // survive the push: clearing either here is what would let a steady
         // stream of messages postpone an answer indefinitely, or erase a send
         // that already happened.
-        const followUpTargets = replyTargetsFor(keep);
-        trackOutstanding(followUpTargets, keep.some(isAgentChannelTrigger));
-        query.push(prompt);
-        archivePrompts.push(prompt);
+        trackOutstanding(replyTargetsFor(keep), keep.some(isAgentChannelTrigger), exchange);
         markCompleted(keptIds);
       } catch (err) {
         // Without this catch the rejection escapes the void IIFE and Node
@@ -598,83 +687,94 @@ export async function processQuery(
   }, ACTIVE_POLL_INTERVAL_MS);
 
   /**
+   * Settle whatever the outbound rows show delivered since the last judgment.
+   * Read even when nobody is waiting: a late second send can land after an
+   * earlier result cleared the queue, and if its seq were left unjudged the
+   * next person's dry turn would inherit that stale delivery and skip its
+   * correction. One scan answers both "who was reached?" and "where does the
+   * baseline move to?", so a row committed between two reads cannot go
+   * uncounted. `exchange` is the one whose result is being judged: a row
+   * stamped for a queued request answers it whenever it appears, but a row
+   * matched by address can only answer requests whose prompt has run.
+   */
+  const settle = (exchange: number): void => {
+    const { maxSeq, deliveries } = getDeliveriesSince(lastJudgedSeq);
+    settleDeliveries(
+      outstanding,
+      knownRequests,
+      deliveries.filter((row) => !loopWritten.has(row.seq)),
+      exchange,
+    );
+    // The baseline advances past everything judged, answered or not: a send
+    // that discharged nobody must not be inherited by whoever asks next.
+    if (maxSeq > 0) lastJudgedSeq = maxSeq;
+  };
+
+  /**
    * Judge a finished tools-only result. Delivery is read off the outbound rows
    * rather than off anything in the text, so a tool the loop never saw counts.
    *
-   * Nothing is judged when nobody is on the hook: a webhook wake that produces
-   * no output is a legitimate ending, not a failure. Otherwise the oldest
-   * waiting correspondent is answered first — one dry judgment spends its
-   * correction, the next closes it out. Closing one out advances the queue
-   * rather than emptying it, so the question behind it still gets its own
-   * correction before anything is written on its behalf.
+   * Only the requests this result's exchange has answered are judged
+   * (`entry.exchange <= exchange`); a request whose prompt is still queued
+   * behind this result is left alone — its own result judges it. Nothing is
+   * judged when nobody due is on the hook: a webhook wake that produces no
+   * output is a legitimate ending, not a failure. Otherwise every due request
+   * still dry after settling is corrected — one correction covers all of them,
+   * and re-homes them onto its own exchange so they are re-judged at ITS
+   * result, not at a follow-up's result queued ahead of it — or, once its
+   * correction is spent, closed out with the placeholder at its own address.
+   * Each entry keeps its own budget, so closing one out never spends or
+   * discards another's.
    */
-  const judgeToolsOnlyResult = async (text: string, inertBlocks: TaskMessageBlock[]): Promise<void> => {
-    // Read even when nobody is currently waiting. A late second send can land
-    // after an earlier result cleared the whole queue; if its seq is left
-    // unjudged, the next person's dry turn can inherit that stale delivery and
-    // incorrectly skip its correction.
-    // One scan answers both "who was reached?" and "where does the baseline
-    // move to?", so a row committed between two reads cannot go uncounted.
-    const { maxSeq: deliveredSeq, destinations: deliveredTo } = getDeliveriesSince(lastJudgedSeq);
-    const head = outstanding[0];
-    if (!head) {
-      if (deliveredSeq > 0) lastJudgedSeq = deliveredSeq;
-      archivePrompts.shift();
-      return;
-    }
-    // An obligation is discharged by output addressed AT IT, not by any chat
-    // row at all. A send to a peer agent, or to a second destination in a
-    // multi-destination group, writes the same `kind: 'chat'` row as a reply —
-    // crediting it would mark the asker's question answered while the asker
-    // hears nothing. A targetless (agent-wake) entry has no address to match,
-    // so it keeps the address-blind reading: anything landing anywhere counts.
-    const isAnswered = (entry: OutstandingReply): boolean =>
-      entry.target ? deliveredTo.some((d) => sameDestination(d, entry.target!)) : deliveredSeq > 0;
-    const headAnswered = isAnswered(head);
+  const judgeToolsOnlyResult = async (
+    exchange: number,
+    text: string,
+    inertBlocks: TaskMessageBlock[],
+  ): Promise<void> => {
+    const due = outstanding.filter((entry) => entry.exchange <= exchange);
+    settle(exchange);
+    const stillDue = due.filter((entry) => outstanding.includes(entry));
+    const spent = stillDue.filter((entry) => entry.nudged);
+    const dry = stillDue.filter((entry) => !entry.nudged);
     notifyExchangeComplete(onExchangeComplete, {
-      prompt: archivePrompts[0] ?? initialPrompt,
+      prompt: promptOf(exchange),
       result: text,
       continuation: queryContinuation ?? initialContinuation,
-      status: headAnswered ? 'completed' : head.nudged ? 'fallback' : 'undelivered',
+      status: dry.length > 0 ? 'undelivered' : spent.length > 0 ? 'fallback' : 'completed',
     });
-    // The baseline advances past everything judged, answered or not: a send
-    // that discharged nobody must not be inherited by whoever asks next.
-    if (deliveredSeq > 0) lastJudgedSeq = deliveredSeq;
-    // Drop every correspondent this turn's output actually reached. Two
-    // questions from the same address are both closed by one reply — which of
-    // them it answered is not knowable from here, and holding the second back
-    // would post a placeholder over a reply already given. Correspondents the
-    // output never reached stay on the hook.
-    for (let i = outstanding.length - 1; i >= 0; i--) {
-      if (isAnswered(outstanding[i])) outstanding.splice(i, 1);
+    for (const entry of spent) {
+      outstanding.splice(outstanding.indexOf(entry), 1);
+      if (entry.target) {
+        loopWritten.add(await deliverToolsOnlyPlaceholder(entry.target));
+      } else {
+        // Documented residual: a model still dry after its agent-wake correction
+        // ends in silence. The batch has no human endpoint to write to, so the
+        // never-silent guarantee cannot apply here — writing anything would be
+        // unsolicited output into an agent loop. Deliberate, and bounded by the
+        // one correction the entry already spent.
+        log('Agent-channel wake stayed dry after its correction — nothing emitted');
+      }
     }
-    if (headAnswered) {
-      archivePrompts.shift();
-      return;
+    if (dry.length === 0) return;
+    const names = getAllDestinations()
+      .map((d) => d.name)
+      .join(', ');
+    log(`Tools-only turn delivered nothing for ${dry.length} request(s) — correcting once`);
+    // The correction's sends answer the dry request(s): it carries the last
+    // one's stamp, the same "last triggering row" policy a batch uses (see
+    // toolStampFor), and opens a fresh send budget — the turn may already have
+    // sent to this address for someone else, and a correction the budget then
+    // refuses would only ever end in the placeholder. The correction answers
+    // the SAME prompt, which the exchange hook reports for its result.
+    const last = dry[dry.length - 1];
+    // A targetless (agent-wake) entry keeps its batch's stamp: the a2a return
+    // path resolves the origin session from it.
+    const stamp = last.target ? last.target.inReplyTo : stampOf(last.exchange);
+    const correction = pushPrompt(buildToolsOnlyNudge(text, inertBlocks, names), stamp, true, promptOf(exchange));
+    for (const entry of dry) {
+      entry.nudged = true;
+      entry.exchange = correction;
     }
-    if (!head.nudged) {
-      head.nudged = true;
-      const names = getAllDestinations()
-        .map((d) => d.name)
-        .join(', ');
-      log('Tools-only turn delivered nothing — correcting once');
-      // The correction answers the SAME prompt, so it stays queued for the
-      // retry to archive against.
-      query.push(buildToolsOnlyNudge(text, inertBlocks, names));
-      return;
-    }
-    outstanding.shift();
-    if (head.target) {
-      lastJudgedSeq = await deliverToolsOnlyPlaceholder(head.target);
-    } else {
-      // Documented residual: a model still dry after its agent-wake correction
-      // ends in silence. The batch has no human endpoint to write to, so the
-      // never-silent guarantee cannot apply here — writing anything would be
-      // unsolicited output into an agent loop. Deliberate, and bounded by the
-      // one correction the entry already spent.
-      log('Agent-channel wake stayed dry after its correction — nothing emitted');
-    }
-    archivePrompts.shift();
   };
 
   try {
@@ -712,18 +812,33 @@ export async function processQuery(
         // (send_message) mid-turn, or the message may not need a response
         // at all — either way the turn is finished.
         markCompleted(initialBatchIds);
+        // The exchange this result answers — see promptsPushed / resultsSeen.
+        const exchange = resultsSeen++;
+        if (exchange >= promptsPushed) {
+          log(
+            `Result #${exchange} arrived with only ${promptsPushed} prompt(s) pushed — this provider answers ` +
+              'more than once per prompt, and the per-exchange accounting below is now one exchange off',
+          );
+        }
         if (toolsOnly && event.isError === true) {
-          await handleToolsOnlyError(event.text ?? '', outstanding.find((o) => o.target)?.target, lastJudgedSeq);
-          const noticeSeq = getDeliveredSeqSince(lastJudgedSeq);
-          if (noticeSeq > 0) lastJudgedSeq = noticeSeq;
-          outstanding.length = 0;
+          // Only the requests this exchange answered get the notice — after
+          // settling, so a send that landed before the failure is not doubled
+          // up on. A follow-up whose prompt is still queued runs afterwards
+          // and is judged at its own result.
+          settle(exchange);
+          const failed = outstanding.filter((entry) => entry.exchange <= exchange);
+          for (const entry of failed) outstanding.splice(outstanding.indexOf(entry), 1);
+          const targets = failed.flatMap((entry) => (entry.target ? [entry.target] : []));
+          if (failed.length > 0 && targets.length === 0) {
+            log('Errored tools-only turn had no human endpoint — no notice sent');
+          }
+          for (const seq of await handleToolsOnlyError(event.text ?? '', targets)) loopWritten.add(seq);
           notifyExchangeComplete(onExchangeComplete, {
-            prompt: archivePrompts[0] ?? initialPrompt,
+            prompt: promptOf(exchange),
             result: event.text,
             continuation: queryContinuation ?? initialContinuation,
             status: 'error',
           });
-          archivePrompts.shift();
         } else if (event.text) {
           const { hasUnwrapped, taskBlocks, resultBlocks } = await dispatchResultText(event.text, routing, {
             midTurnSent,
@@ -755,14 +870,13 @@ export async function processQuery(
             // the failing gateway turn after turn.
             await deliverErrorResult(event.text, routing);
             notifyExchangeComplete(onExchangeComplete, {
-              prompt: archivePrompts[0] ?? initialPrompt,
+              prompt: promptOf(exchange),
               result: event.text,
               continuation: queryContinuation ?? initialContinuation,
               status: 'error',
             });
-            archivePrompts.shift();
           } else if (toolsOnly) {
-            await judgeToolsOnlyResult(event.text, taskBlocks);
+            await judgeToolsOnlyResult(exchange, event.text, taskBlocks);
           } else {
             // An unwrapped final text only warrants the wrap-nudge when NOTHING
             // was delivered this turn — hasUnwrapped already folds in the
@@ -778,7 +892,7 @@ export async function processQuery(
             // is the one thing envelope mode has always refused to do, and
             // `bare text produces no outbound messages` asserts it.
             notifyExchangeComplete(onExchangeComplete, {
-              prompt: archivePrompts[0] ?? initialPrompt,
+              prompt: promptOf(exchange),
               result: event.text,
               continuation: queryContinuation ?? initialContinuation,
               status: hasUnwrapped || willRetryTaskBlocks ? 'undelivered' : 'completed',
@@ -787,11 +901,15 @@ export async function processQuery(
               unwrappedNudged = true;
               const destinations = getAllDestinations();
               const names = destinations.map((d) => d.name).join(', ');
-              query.push(
+              // A retry answers the same request: it inherits this exchange's stamp.
+              pushPrompt(
                 `<system>Your response was not delivered — it was not wrapped in <message to="name">...</message> blocks. ` +
                   `All output must be wrapped: use <message to="name"> for content to send, or <internal> for scratchpad. ` +
                   `Your destinations: ${names}. ` +
                   `Please re-send your response with the correct wrapping.</system>`,
+                stampOf(exchange),
+                false,
+                promptOf(exchange),
               );
             }
             if (willRetryTaskBlocks) {
@@ -799,18 +917,21 @@ export async function processQuery(
               const names = getAllDestinations()
                 .map((d) => d.name)
                 .join(', ');
-              query.push(buildTaskBlockNudge(taskBlocks, names));
+              pushPrompt(buildTaskBlockNudge(taskBlocks, names), stampOf(exchange), false, promptOf(exchange));
             }
-            // A retry result (wrapping or task-block nudge) answers the SAME
-            // user prompt — keep it queued so the retry archives against it,
-            // not the nudge text.
-            if (!willRetryWrapping && !willRetryTaskBlocks) archivePrompts.shift();
           }
         } else if (toolsOnly) {
           // A textless result is a success only if a tool ran — otherwise it is
           // the same dry turn as one that ended in scratchpad.
-          await judgeToolsOnlyResult('', []);
-        } else archivePrompts.shift();
+          await judgeToolsOnlyResult(exchange, '', []);
+        }
+        // Stamp hand-over: if a prompt is queued behind this result (a
+        // follow-up pushed mid-turn, or a correction just pushed), the
+        // provider starts it now, so its tool sends must carry ITS request id
+        // and, for a new turn, a fresh send budget. With nothing queued the
+        // stamp stays on the exchange that just ended — a late send still
+        // belongs to it — until the next push re-points it.
+        if (promptsPushed > resultsSeen) handOver(resultsSeen);
         // Turn boundary: reset the per-turn sent count after the result's
         // nudge decision has used it. A nudge retry re-counts via its own
         // text events before the retry result, so resetting on every result
@@ -828,7 +949,7 @@ export async function processQuery(
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
     notifyExchangeComplete(onExchangeComplete, {
-      prompt: archivePrompts[0] ?? initialPrompt,
+      prompt: promptOf(resultsSeen),
       result: `Error: ${errMsg}`,
       continuation: queryContinuation ?? initialContinuation,
       status: 'error',
@@ -837,6 +958,9 @@ export async function processQuery(
   } finally {
     done = true;
     clearInterval(pollHandle);
+    if (!endedForCommand && promptsPushed > resultsSeen) {
+      log(`Query ended with ${promptsPushed - resultsSeen} pushed prompt(s) never answered by a result`);
+    }
   }
 
   return { continuation: queryContinuation };
@@ -1364,28 +1488,149 @@ export function buildToolsOnlyNudge(text: string, inertBlocks: TaskMessageBlock[
 export const TOOLS_ONLY_ERROR_NOTICE = "Something went wrong on my side and I couldn't finish that one.";
 
 /**
- * Report an errored tools-only turn. The notice goes out only when the turn is
- * owed to a human endpoint and has not already delivered — an error arriving
- * after a successful tool send would otherwise double up on the reply.
+ * Report an errored tools-only turn to the people it was still owed to. The
+ * caller has already settled whatever the turn delivered before failing, so
+ * every target here is one the failure left unanswered — an error arriving
+ * after a successful tool send does not double up on the reply. One notice per
+ * address: two questions waiting in the same place get one "something went
+ * wrong", not two. Returns the seqs written.
  */
-export async function handleToolsOnlyError(
-  text: string,
-  target: ReplyTarget | undefined,
-  lastJudgedSeq: number,
-): Promise<void> {
+export async function handleToolsOnlyError(text: string, targets: ReplyTarget[]): Promise<number[]> {
   log(`Tools-only error result (not forwarded): ${text.slice(0, 500)}`);
-  if (!target) {
-    log('Errored tools-only turn had no human endpoint — no notice sent');
-    return;
+  const noticed: ReplyTarget[] = [];
+  const written: number[] = [];
+  for (const target of targets) {
+    if (noticed.some((done) => sameDestination(done, target))) continue;
+    noticed.push(target);
+    written.push(await writeToReplyTarget(target, TOOLS_ONLY_ERROR_NOTICE));
   }
-  // "Already delivered" means delivered TO THIS TARGET. A send to a peer agent
-  // or to another destination is not a reply this person received, and skipping
-  // the notice on it would leave them with silence after a failed turn.
-  if (getDeliveriesSince(lastJudgedSeq).destinations.some((d) => sameDestination(d, target))) {
-    log('Errored tools-only turn had already delivered — no notice sent');
-    return;
+  return written;
+}
+
+/**
+ * The inbound id the MCP tools stamp on outbound rows for this batch. The last
+ * triggering human row wins: an accumulated trigger=0 context row riding along
+ * ahead of the engaging mention is not what the reply answers, and tools-only
+ * reconciliation matches the stamp against reply targets, which only
+ * triggering rows become (live-observed: a reply stamped with the first
+ * context row's id). A batch with no such row — a task run, an agent-to-agent
+ * wake — keeps the batch routing's id, so a2a return-path routing is unchanged.
+ *
+ * One stamp per batch is a known limit: when two human triggers land in the
+ * same batch, only the last can be attributed by exact stamp; a send for the
+ * other falls to the address match in settleDeliveries. Per-send attribution
+ * would need the tool call to name its request, which the tool surface does
+ * not carry today.
+ */
+function toolStampFor(batch: MessageInRow[]): string | null {
+  return stampForRouting(extractRouting(batch));
+}
+
+function stampForRouting(routing: RoutingContext): string | null {
+  const targets = routing.replyTargets ?? [];
+  return targets.length > 0 ? targets[targets.length - 1].inReplyTo : routing.inReplyTo;
+}
+
+/** A request this query has held on the hook, with the exchange that carried it last. */
+export interface KnownRequest {
+  target: ReplyTarget;
+  exchange: number;
+}
+
+/**
+ * Drop from `outstanding` every request the given deliveries answered.
+ * `exchange` is the one whose result is being judged: no prompt past it has
+ * run, so a row can only have been meant for a request that prompt or an
+ * earlier one carried.
+ *
+ * An obligation is discharged by output addressed AT IT, not by any chat row
+ * at all. A send to a peer agent, or to a second destination in a
+ * multi-destination group, writes the same `kind: 'chat'` row as a reply —
+ * crediting it would mark the asker's question answered while the asker hears
+ * nothing. Two readings, in order:
+ *
+ * 1. Exact stamp. A row whose `in_reply_to` names a request this query has
+ *    held — still open, or settled earlier (a send_file after the
+ *    send_message that paid it off) — and that sits on that request's chat
+ *    answers THAT request, whatever its exchange. It never falls through to
+ *    the address match, so it can never settle another asker's question on
+ *    the same chat. It also answers everyone waiting at exactly its address
+ *    whose prompt is the same one that carried the stamped request: they all
+ *    see it there, and the tools allow that prompt one plain send per address
+ *    anyway. Not a same-address request from a later prompt — that prompt
+ *    gets its own budget and its own judgment (live shape: a DM, where every
+ *    request shares one address). The chat condition keeps the stamp from
+ *    over-reaching: the tools stamp every row of a turn, a send to a peer
+ *    agent or to another destination included, and those are not replies
+ *    this person received.
+ * 2. Address, for every other row (a stale stamp, none, or a stamp for a
+ *    request on some other chat), among requests whose prompt has run. A row
+ *    answers everyone waiting at exactly its address: which of two
+ *    same-address questions it answered is not knowable, and holding one back
+ *    would post a placeholder over a reply already given. A THREAD-LESS row
+ *    that reaches nobody that way answers the oldest request waiting in a
+ *    thread of that chat: `send_message` stamps its thread from
+ *    session_routing, which is NULL in a shared session even when the request
+ *    arrived in a thread, so the row is still a visible reply on the
+ *    requesting surface — but one reply answers ONE such request; any other
+ *    threaded asker stays on the hook so the correction (and, failing that,
+ *    the placeholder) still reaches them rather than being silently dropped.
+ *
+ * A targetless (agent-wake) entry has no address to match, so it keeps the
+ * address-blind reading: anything landing anywhere counts, once its prompt
+ * has run. Deliveries are taken oldest first, and stamped rows before
+ * unstamped ones, so a stamped reply always claims its own request before an
+ * unstamped one is matched by address.
+ */
+export function settleDeliveries(
+  outstanding: OutstandingReply[],
+  knownRequests: Map<string, KnownRequest>,
+  deliveries: Delivery[],
+  exchange: number,
+): void {
+  for (const entry of outstanding) {
+    if (entry.target?.inReplyTo)
+      knownRequests.set(entry.target.inReplyTo, { target: entry.target, exchange: entry.exchange });
   }
-  await writeToReplyTarget(target, TOOLS_ONLY_ERROR_NOTICE);
+  if (deliveries.length === 0) return;
+  const answered = new Set<OutstandingReply>();
+  const open = (): OutstandingReply[] => outstanding.filter((entry) => !answered.has(entry));
+  const ran = (entry: OutstandingReply): boolean => entry.exchange <= exchange;
+  const sameChat = (a: Delivery, b: ReplyTarget): boolean =>
+    a.platformId === b.platformId && a.channelType === b.channelType;
+  const atAddress = (row: Delivery): OutstandingReply[] =>
+    open().filter((entry) => entry.target !== undefined && sameDestination(row, entry.target));
+  const stampedRequest = (row: Delivery): KnownRequest | undefined => {
+    const request = row.inReplyTo === null ? undefined : knownRequests.get(row.inReplyTo);
+    return request && sameChat(row, request.target) ? request : undefined;
+  };
+  const stamped = deliveries.filter((row) => stampedRequest(row) !== undefined);
+  const unstamped = deliveries.filter((row) => !stamped.includes(row));
+  for (const row of stamped) {
+    const request = stampedRequest(row)!;
+    for (const entry of open()) {
+      if (entry.target?.inReplyTo === row.inReplyTo) answered.add(entry);
+    }
+    for (const entry of atAddress(row)) {
+      if (entry.exchange === request.exchange) answered.add(entry);
+    }
+  }
+  for (const row of unstamped) {
+    const exact = atAddress(row).filter(ran);
+    for (const entry of exact) answered.add(entry);
+    if (exact.length === 0 && row.threadId === null) {
+      const oldestInThread = open().find(
+        (entry) => entry.target !== undefined && ran(entry) && sameChat(row, entry.target),
+      );
+      if (oldestInThread) answered.add(oldestInThread);
+    }
+  }
+  for (const entry of open()) {
+    if (!entry.target && ran(entry)) answered.add(entry);
+  }
+  for (let i = outstanding.length - 1; i >= 0; i--) {
+    if (answered.has(outstanding[i])) outstanding.splice(i, 1);
+  }
 }
 
 /**

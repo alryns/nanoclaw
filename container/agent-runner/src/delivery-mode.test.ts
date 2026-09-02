@@ -18,12 +18,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 
 import { loadConfig, resetConfig } from './config.js';
 import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from './mailbox/sqlite/connection.js';
-import {
-  getDeliveredSeqSince,
-  getDeliveriesSince,
-  getUndeliveredMessages,
-  writeMessageOut,
-} from './db/messages-out.js';
+import { getDeliveriesSince, getUndeliveredMessages, writeMessageOut } from './db/messages-out.js';
 import { getPendingMessages } from './db/messages-in.js';
 import { buildCompactInstructions } from './compact-instructions.js';
 import { buildSystemPromptAddendum } from './destinations.js';
@@ -282,7 +277,7 @@ describe('delivery accounting', () => {
       channel_type: 'discord',
       content: JSON.stringify({ text: 'from an earlier turn' }),
     });
-    expect(getDeliveredSeqSince(0)).toBeGreaterThan(0);
+    expect(getDeliveriesSince(0).maxSeq).toBeGreaterThan(0);
 
     const { query, pushes } = makeQuery('done');
     await runToolsOnly(query);
@@ -333,7 +328,7 @@ describe('delivery accounting', () => {
     writeMessageOut({ id: 'log-1', kind: 'task_log', content: JSON.stringify({ text: 'ran' }) });
     writeMessageOut({ id: 'sys-1', kind: 'system', content: JSON.stringify({ action: 'cli_request' }) });
 
-    expect(getDeliveredSeqSince(0)).toBe(0);
+    expect(getDeliveriesSince(0).maxSeq).toBe(0);
   });
 
   it('reads the window above a baseline, so one call answers both questions', async () => {
@@ -347,8 +342,8 @@ describe('delivery accounting', () => {
 
     // Below the baseline: invisible. Above: reported — and the reported value
     // IS the next baseline, so no second read can absorb a racing write.
-    expect(getDeliveredSeqSince(first)).toBe(0);
-    expect(getDeliveredSeqSince(first - 1)).toBe(first);
+    expect(getDeliveriesSince(first).maxSeq).toBe(0);
+    expect(getDeliveriesSince(first - 1).maxSeq).toBe(first);
 
     const second = await writeMessageOut({
       id: 'd-2',
@@ -357,7 +352,7 @@ describe('delivery accounting', () => {
       channel_type: 'discord',
       content: JSON.stringify({ text: 'two' }),
     });
-    expect(getDeliveredSeqSince(first)).toBe(second);
+    expect(getDeliveriesSince(first).maxSeq).toBe(second);
   });
 
   it('reports nothing when everything above the baseline is an annotation', () => {
@@ -376,12 +371,13 @@ describe('delivery accounting', () => {
       content: JSON.stringify({ operation: 'reaction', messageId: 'p', emoji: '\u{1F44D}' }),
     });
 
-    expect(getDeliveredSeqSince(base)).toBe(0);
+    expect(getDeliveriesSince(base).maxSeq).toBe(0);
   });
 
-  it('reports the address of every delivery, not just that one happened', async () => {
+  it('reports the address and the stamp of every delivery, oldest first', async () => {
     await writeMessageOut({
       id: 'to-human',
+      in_reply_to: 'm1',
       kind: 'chat',
       platform_id: 'chan-1',
       channel_type: 'discord',
@@ -395,10 +391,13 @@ describe('delivery accounting', () => {
       content: JSON.stringify({ text: 'for the peer' }),
     });
 
-    const { destinations } = getDeliveriesSince(0);
+    const { deliveries } = getDeliveriesSince(0);
 
-    expect(destinations).toContainEqual({ platformId: 'chan-1', channelType: 'discord', threadId: null });
-    expect(destinations).toContainEqual({ platformId: 'peer-group', channelType: 'agent', threadId: null });
+    expect(deliveries.map((d) => ({ ...d, seq: undefined }))).toEqual([
+      { platformId: 'chan-1', channelType: 'discord', threadId: null, inReplyTo: 'm1', seq: undefined },
+      { platformId: 'peer-group', channelType: 'agent', threadId: null, inReplyTo: null, seq: undefined },
+    ]);
+    expect(deliveries[0].seq).toBeLessThan(deliveries[1].seq);
   });
 });
 
@@ -876,14 +875,62 @@ describe('outstanding questions are a queue', () => {
     const { query, pushes } = makeQuery('dry', 'dry', 'dry', 'dry');
     await processQuery(query, routing, ['u1', 'u2'], 'mock', undefined, 'prompt', undefined, 'tools-only');
 
-    // Each gets its own correction and its own placeholder, at its own address.
-    expect(pushes.filter((p) => p.includes('Nothing from your last turn'))).toHaveLength(2);
+    // Both went dry at the same result, so one correction covers both — a
+    // second would only re-run the same turn — but each is closed out with its
+    // own placeholder, at its own address, and nothing is chased afterwards.
+    expect(pushes.filter((p) => p.includes('Nothing from your last turn'))).toHaveLength(1);
     const rows = getUndeliveredMessages().filter((m) => m.kind === 'chat');
     expect(rows.map((r) => r.in_reply_to)).toEqual(['u1', 'u2']);
     expect(rows.map((r) => r.thread_id)).toEqual([null, 'thread-2']);
   });
 
-  it('clears the queue once the agent actually delivers', async () => {
+  it('keeps a correction to the requests that went dry at its own result', async () => {
+    // Q1 is dry and corrected. Q2 arrives while the correction is queued. The
+    // correction's result answers Q1 only: Q2's prompt has not run yet, so it
+    // is neither settled nor chased there — its own result judges it.
+    const pushes: string[] = [];
+    async function* events(): AsyncGenerator<ProviderEvent> {
+      yield { type: 'init', continuation: 's1' };
+      yield { type: 'result', text: 'dry for question one' };
+      insertChat('m2', 'second question', { threadId: 'thread-2' });
+      const deadline = Date.now() + 5000;
+      while (!pushes.some((p) => p.includes('second question')) && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      // The correction's result: Q1 gets its placeholder. Q2 untouched.
+      yield { type: 'result', text: 'still dry for question one' };
+      // Q2's own turn answers it.
+      writeMessageOut({
+        id: 'tool-1',
+        in_reply_to: 'm2',
+        kind: 'chat',
+        platform_id: 'chan-1',
+        channel_type: 'discord',
+        content: JSON.stringify({ text: 'answer two' }),
+      });
+      yield { type: 'result', text: 'sent two' };
+    }
+    const query: AgentQuery = {
+      push: (m: string) => {
+        pushes.push(m);
+      },
+      end: () => {},
+      events: events(),
+      abort: () => {},
+    };
+
+    await runToolsOnly(query);
+
+    expect(pushes.filter((p) => p.includes('Nothing from your last turn'))).toHaveLength(1);
+    const rows = getUndeliveredMessages().filter((m) => m.kind === 'chat');
+    expect(rows.map((r) => JSON.parse(r.content).text)).toEqual([TOOLS_ONLY_PLACEHOLDER, 'answer two']);
+    expect(rows.map((r) => r.in_reply_to)).toEqual(['m1', 'm2']);
+  });
+
+  it('settles each question by the turn that answered it, then stops chasing', async () => {
+    // Q1's correction sends; Q2, pushed behind it, has not run yet, so that
+    // reply is Q1's alone. Q2's own turn answers Q2. Nothing is owed after
+    // that, so a further dry result is not chased.
     const pushes: string[] = [];
     async function* events(): AsyncGenerator<ProviderEvent> {
       yield { type: 'init', continuation: 's1' };
@@ -898,10 +945,17 @@ describe('outstanding questions are a queue', () => {
         kind: 'chat',
         platform_id: 'chan-1',
         channel_type: 'discord',
-        content: JSON.stringify({ text: 'answering both at once' }),
+        content: JSON.stringify({ text: 'answer one' }),
       });
       yield { type: 'result', text: 'sent it' };
-      // Nothing is owed now, so a further dry result is not chased.
+      writeMessageOut({
+        id: 'tool-2',
+        kind: 'chat',
+        platform_id: 'chan-1',
+        channel_type: 'discord',
+        content: JSON.stringify({ text: 'answer two' }),
+      });
+      yield { type: 'result', text: 'sent two' };
       yield { type: 'result', text: 'idle chatter' };
     }
     const query: AgentQuery = {
@@ -916,7 +970,7 @@ describe('outstanding questions are a queue', () => {
     await runToolsOnly(query);
 
     expect(pushes.filter((p) => p.includes('Nothing from your last turn'))).toHaveLength(1);
-    expect(userTexts()).toEqual(['answering both at once']);
+    expect(userTexts()).toEqual(['answer one', 'answer two']);
   });
 });
 
@@ -964,7 +1018,10 @@ describe('provider errors', () => {
   });
 
   it('reaches a real user even when an agent wake sits at the head of the queue', async () => {
-    // A targetless entry in front must not swallow the one notification.
+    // A targetless entry in front must not swallow the notification. The
+    // question arrives while the wake's turn is live, so it is queued behind
+    // it: the wake's error is the wake's alone (no endpoint, no notice), and
+    // the question is noticed at its own failing result.
     insertChat('a1', 'host notice', { channelType: 'agent' });
     const routing = extractRouting(getPendingMessages());
     expect(routing.agentWake).toBe(true);
@@ -977,6 +1034,7 @@ describe('provider errors', () => {
       while (!pushes.some((p) => p.includes('a real question')) && Date.now() < deadline) {
         await new Promise((r) => setTimeout(r, 50));
       }
+      yield { type: 'result', text: null, isError: true };
       yield { type: 'result', text: null, isError: true };
     }
     const query: AgentQuery = {

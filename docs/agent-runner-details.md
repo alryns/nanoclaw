@@ -398,6 +398,66 @@ Everything below is handled by the agent-runner, not the provider.
 
 The agent-runner signals "busy" status to the host. The mechanism for this is provider-specific — for Claude, the query AsyncGenerator is still yielding events. For others, the agent-runner can write a heartbeat or status indicator to the session DB that the host checks before killing.
 
+### Delivery Modes
+
+Each agent group has a `delivery_mode` (`container_configs.delivery_mode`, set with
+`ncl groups config update --delivery-mode envelope|tools-only`; the runner reads it
+from the materialized `container.json`). It decides what counts as a delivery from a
+chat turn:
+
+- **`envelope`** (default) — the final text is the delivery door: `<message to="name">`
+  blocks are sent, everything else is scratchpad. An unwrapped turn is nudged once and
+  then left as scratchpad. Unchanged from before delivery modes existed.
+- **`tools-only`** — only an explicit outbound tool call (`send_message`, `send_file`,
+  `send_card`, …) delivers. Envelopes, tool-call-shaped markup, plain prose and provider
+  error text are all scratchpad. Meant for small or open-weight models that cannot hold
+  the envelope contract; the system prompt and the post-compaction reminder teach the
+  tool contract instead.
+
+Task runs keep the one-door task path in either mode.
+
+**Tools-only accounting (poll loop).** The loop never reads delivery off the text; it
+reads it off `messages_out`. Every human-triggered inbound row in a batch puts one
+*request* on the hook (`replyTargetsFor`: address + `in_reply_to`), a host notice or peer
+wake puts one targetless entry on it, and a webhook wake puts nothing. At each provider
+`result` the loop:
+
+1. **Settles** whatever landed since the last judgment (`settleDeliveries`). A row whose
+   `in_reply_to` names a request of this query, on that request's chat, answers *that*
+   request (exact stamp) plus anyone waiting at exactly its address whose prompt is the
+   same one — a same-address request from a later prompt (a DM follow-up) is judged by its
+   own turn. Any other row answers everyone at exactly its address whose prompt has run; a
+   thread-less row that reaches nobody that way answers the oldest such request waiting in
+   a thread of that chat — a shared session posts thread-less even for a threaded request —
+   but only one such request. A peer-agent send never discharges a person; a targetless
+   entry is discharged by anything at all once its prompt has run.
+2. **Judges** only the requests whose prompt has run. Prompts carry an *exchange ordinal*
+   (opening prompt 0, every push the next one) and the n-th result answers exchange n; a
+   follow-up pushed into a live turn is judged at its own result, never at the previous
+   turn's. Requests still dry get one shared correction (`buildToolsOnlyNudge`), which
+   re-homes them onto its own exchange; a request dry again at the correction's result gets
+   `TOOLS_ONLY_PLACEHOLDER` at its own address. A person is never left silent and never
+   chased twice; a host notice or peer wake (no human endpoint) is corrected once and then
+   ends in silence by design.
+3. **Hands over the stamp.** `current_in_reply_to` — what `send_message` / `send_file`
+   stamp on their rows — is published per exchange when the provider actually starts it:
+   at push time if idle, else at the result that ends the exchange ahead. A follow-up or a
+   correction also republishes the turn's outbound baseline, so the one-plain-send-per-
+   destination-per-turn budget restarts with it; envelope retries keep their turn's stamp.
+   The stamp of a batch is its last triggering row, not an accumulated context row or the
+   batch's first row; this holds in envelope mode too, so a batch mixing a peer notice with
+   a user message stamps the user message (the a2a return path then falls back to peer
+   affinity for that reply).
+
+The accounting rests on the provider answering every pushed prompt with exactly one
+`result`. The loop logs when a result arrives with no prompt behind it, and at query end
+when pushed prompts went unanswered.
+
+An `isError` result under tools-only sends `TOOLS_ONLY_ERROR_NOTICE` once per address
+still owed by that exchange (never the provider's text), and leaves queued follow-ups to
+their own results. Tests: `delivery-mode.test.ts` (contract) and
+`delivery-mode.followup.test.ts` (attribution across follow-up pushes).
+
 ### Message Formatting
 
 The agent-runner transforms messages_in rows into a prompt string. The provider receives a ready-to-send string — it doesn't know about message kinds or routing.

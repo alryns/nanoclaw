@@ -88,8 +88,32 @@ describe('send_card', () => {
     });
 
     expect(result.content[0].text).toContain('1 invalid action(s) were dropped');
-    expect(result.content[0].text).toContain('non-empty label and url');
+    expect(result.content[0].text).toContain('absolute url');
   });
+
+  // A model asked for an approval card cannot make a callback button, so it
+  // fakes one with a placeholder href. Dropping it points the agent at
+  // ask_user_question instead of posting two dead links.
+  it.each([['#'], ['/docs'], ['example.com'], ['   ']])('drops a link action whose url is %p', async (url) => {
+    const result = await sendCard.handler({
+      card: { title: 'Test Approval Card', actions: [{ label: 'Approve', url }] },
+    });
+
+    expect(result.content[0].text).toContain('1 invalid action(s) were dropped');
+    const content = JSON.parse(getUndeliveredMessages()[0].content);
+    expect(content.card.actions).toEqual([]);
+  });
+
+  it.each([['https://example.com'], ['http://localhost:3000/x'], ['mailto:someone@example.com'], ['tel:+34600000000']])(
+    'keeps a link action whose url is %p',
+    async (url) => {
+      const result = await sendCard.handler({ card: { title: 'Test', actions: [{ label: 'Open', url }] } });
+
+      expect(result.content[0].text).toMatch(/^Card sent \(id: msg-[^)]+\)$/);
+      const content = JSON.parse(getUndeliveredMessages()[0].content);
+      expect(content.card.actions).toEqual([{ label: 'Open', url }]);
+    },
+  );
 
   it('constrains children to text instead of promising nested action blocks', () => {
     const cardSchema = sendCard.tool.inputSchema.properties.card as {

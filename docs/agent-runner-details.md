@@ -583,8 +583,12 @@ structure in content. One schema — `LINK_ACTION_SCHEMA` in
 the tool's `inputSchema` and compiled once as the validator the handler runs, so
 invalid actions are filtered out before the row is written and the reported
 dropped count matches what was stored. Every link action needs a non-empty
-`label` and an absolute `url` (a scheme is required, so a placeholder like `#`
-is dropped and the agent is pointed at `ask_user_question`). The bridge repeats the check, because any producer can write
+`label` and a `url` that is a web link — `http://` or `https://`, with a host.
+Those are the only schemes every adapter can render as a button, and the agent
+does not pick the channel, so the tool promises no more than that: `#`,
+`mailto:` and the rest are dropped and the agent is pointed at
+`ask_user_question`. The bridge does not re-apply that rule. It drops an action
+only when `label` or `url` is not a non-empty string. Any producer can write
 this payload. Nested action blocks and callback actions are not supported by
 this tool.
 

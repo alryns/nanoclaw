@@ -88,13 +88,30 @@ describe('send_card', () => {
     });
 
     expect(result.content[0].text).toContain('1 invalid action(s) were dropped');
-    expect(result.content[0].text).toContain('absolute url');
+    expect(result.content[0].text).toContain('web link (http or https)');
   });
 
   // A model asked for an approval card cannot make a callback button, so it
   // fakes one with a placeholder href. Dropping it points the agent at
-  // ask_user_question instead of posting two dead links.
-  it.each([['#'], ['/docs'], ['example.com'], ['   ']])('drops a link action whose url is %p', async (url) => {
+  // ask_user_question instead of posting two dead links. Non-web schemes go the
+  // same way: the agent does not pick the channel, and mailto:/tel: are not
+  // link buttons on Discord or Telegram.
+  it.each([
+    ['#'],
+    ['/docs'],
+    ['example.com'],
+    ['   '],
+    ['localhost:3000'],
+    ['mailto:someone@example.com'],
+    ['tel:+34600000000'],
+    ['javascript:alert(1)'],
+    // A scheme with no host satisfies the drop message read literally, so it is
+    // the cheapest wrong retry; whitespace would break out of '[label](url)'.
+    ['https://'],
+    ['https:///nohost'],
+    ['https://example.com '],
+    ['https://example.com\njavascript:alert(1)'],
+  ])('drops a link action whose url is %p', async (url) => {
     const result = await sendCard.handler({
       card: { title: 'Test Approval Card', actions: [{ label: 'Approve', url }] },
     });
@@ -104,7 +121,9 @@ describe('send_card', () => {
     expect(content.card.actions).toEqual([]);
   });
 
-  it.each([['https://example.com'], ['http://localhost:3000/x'], ['mailto:someone@example.com'], ['tel:+34600000000']])(
+  // The scheme is case-insensitive per RFC 3986 §3.1, and an agent quoting a
+  // url out of a document may well quote it uppercase.
+  it.each([['https://example.com'], ['http://localhost:3000/x'], ['HTTPS://EXAMPLE.COM']])(
     'keeps a link action whose url is %p',
     async (url) => {
       const result = await sendCard.handler({ card: { title: 'Test', actions: [{ label: 'Open', url }] } });
@@ -114,6 +133,12 @@ describe('send_card', () => {
       expect(content.card.actions).toEqual([{ label: 'Open', url }]);
     },
   );
+
+  it('states the url rule in the schema description the agent reads', () => {
+    const url = LINK_ACTION_SCHEMA.properties.url as { description: string };
+
+    expect(url.description).toContain('http or https');
+  });
 
   it('constrains children to text instead of promising nested action blocks', () => {
     const cardSchema = sendCard.tool.inputSchema.properties.card as {

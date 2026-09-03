@@ -48,14 +48,19 @@ export const LINK_ACTION_SCHEMA = Object.freeze({
     // A link button has to go somewhere. A placeholder like '#' or a bare path
     // renders as a dead link, and an agent asked for an approval card reaches
     // for exactly that: it cannot make a callback button, so it fakes one.
-    // Requiring a scheme keeps https:, mailto: and tel: while rejecting '#'
-    // and '/docs', and the dropped-action message then points at the tool that
-    // does make buttons.
+    // http and https are the only schemes every adapter can turn into a button,
+    // and the agent does not pick the channel, so the tool promises no more
+    // than that. The pattern is deliberately fussy: the scheme is matched
+    // case-insensitively (RFC 3986 makes it so, and a url lifted verbatim out
+    // of a document may be uppercase), a host character is required so a
+    // hostless 'https://' cannot satisfy the retry advice the drop message
+    // gives, and the anchors reject whitespace, which would otherwise break out
+    // of '[label](url)' on an adapter that degrades a card to markdown.
+    // Rejected: '#', '/docs', 'localhost:3000', 'javascript:', 'mailto:'.
     url: {
       type: 'string' as const,
-      minLength: 1,
-      pattern: '^[a-zA-Z][a-zA-Z0-9+.-]*:',
-      description: "Absolute URL, scheme included, e.g. 'https://example.com'.",
+      pattern: '^[hH][tT][tT][pP][sS]?://[^\\s/?#]\\S*$',
+      description: "Web link (http or https), e.g. 'https://example.com'.",
     },
     style: {
       description: "One of 'primary', 'danger' or 'default'; any other value renders as 'default'.",
@@ -199,7 +204,7 @@ export const sendCard: McpToolDefinition = {
         card: {
           type: 'object',
           description:
-            'Display card with optional title, description, text children, and URL link actions. Each action requires a non-empty label and an absolute url; invalid actions are dropped. Callback buttons are unsupported; use ask_user_question for choices.',
+            'Display card with optional title, description, text children, and URL link actions. Each action requires a non-empty label and a url that is a web link (http or https); invalid actions are dropped. Callback buttons are unsupported; use ask_user_question for choices.',
           properties: {
             title: { type: 'string' },
             description: { type: 'string' },
@@ -253,7 +258,7 @@ export const sendCard: McpToolDefinition = {
     log(`send_card: ${id}`);
     if (dropped > 0) {
       return ok(
-        `Card sent (id: ${id}). ${dropped} invalid action(s) were dropped: send_card link actions need a non-empty label and an absolute url such as https://example.com. Use ask_user_question for callback buttons.`,
+        `Card sent (id: ${id}). ${dropped} invalid action(s) were dropped: send_card link actions need a non-empty label and a url that is a web link (http or https), such as https://example.com. Use ask_user_question for callback buttons.`,
       );
     }
     return ok(`Card sent (id: ${id})`);

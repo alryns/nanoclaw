@@ -189,7 +189,7 @@ If approvals are configured server-side but the host callback isn't running (or 
 
 Four types of skills. See [CONTRIBUTING.md](CONTRIBUTING.md) for the full taxonomy.
 
-- **Channel/provider install skills** — copy the relevant module(s) in from the `channels` or `providers` branch, wire imports, install pinned deps (e.g. `/add-discord`, `/add-slack`, `/add-whatsapp`, `/add-opencode`).
+- **Channel/provider install skills** — copy the relevant module(s) in from the `channels` or `providers` branch, wire imports, install pinned deps (e.g. `/add-discord`, `/add-slack`, `/add-whatsapp`, `/add-opencode`). User-invoked only: every install skill — all `/add-*` plus the Slack companion skills, which is every skill carrying `nc:` fences — declares `disable-model-invocation: true`, so its description stays out of the coding agent's context and you type `/<name>` to run it.
 - **Utility skills** — ship code files alongside `SKILL.md` (e.g. a `scripts/` CLI or helper).
 - **Operational skills** — instruction-only workflows (`/setup`, `/debug`, `/customize`, `/init-first-agent`, `/manage-channels`, `/init-onecli`, `/update-nanoclaw`).
 - **Container skills** — loaded inside agent containers at runtime (`container/skills/`: `agent-browser`, `frontend-engineer`, `onecli-gateway`, `self-customize`, `welcome`; opt-in skills like `vercel-cli` and the channel formatters are copied in by the `/add-*` skill that adds their capability).

@@ -122,21 +122,15 @@ structured result to report `success: true` and `refreshed`. That refreshes the
 barrel-registered `/add-slack` payload; it deliberately does not install
 companion skills, credentials, wirings, or restarts.
 
-Resolve the remote that points at `nanocoai/nanoclaw` the same fork-aware way
-`/update-skills` does; do not assume it is `origin`. Fetch, but never merge:
+The two companion skills ship in-tree: `.claude/skills/slack-a2a-rooms/` and
+`.claude/skills/slack-agent-flow/` on `main` are their canonical source, and the
+copies on the `channels` branch are only a compatibility mirror for older
+checkouts. Never fetch them from the branch over the in-tree copies. If either
+directory is missing, stop and run `/update-nanoclaw` first.
 
-```bash
-source setup/lib/channels-remote.sh
-channels_remote="$(resolve_channels_remote)"
-git fetch "$channels_remote" channels
-```
-
-From `$channels_remote/channels`, materialize every file under
-`.claude/skills/slack-a2a-rooms/` and then every file under
-`.claude/skills/slack-agent-flow/` with `git ls-tree` + `git show`. Read each
-new `SKILL.md` completely and apply its own Apply steps, in that order. The
-order is load-bearing and mirrors `setup/channels/companions.ts`. The standard
-driver may apply each document:
+Apply each in-tree skill through the standard driver, in that order — they are
+user-invoked install skills, so do not paraphrase their Apply steps. The order is
+load-bearing and mirrors `setup/channels/companions.ts`:
 
 ```bash
 pnpm exec tsx setup/lib/skill-driver.ts .claude/skills/slack-a2a-rooms
@@ -145,7 +139,7 @@ pnpm exec tsx setup/lib/skill-driver.ts .claude/skills/slack-agent-flow
 
 Do not continue unless both report fully applied and their own build/tests
 pass. Source contracts: `.claude/skills/add-slack/SKILL.md`,
-`setup/channels/companions.ts`, and the two fetched companion `SKILL.md` files.
+`setup/channels/companions.ts`, and the two in-tree companion `SKILL.md` files.
 
 ## Phase 4: Get provisioning authority
 

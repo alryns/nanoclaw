@@ -22,6 +22,9 @@
 //   6. fixture hygiene: scenario input keys ⊆ the skill's prompt vars, every
 //      unguarded prompt answered by every scenario, and a skill with prompts
 //      MUST ship a fixture file (actionable failure otherwise).
+//   7. install skills are user-invoked: every add-* skill and every fence-carrying
+//      skill declares `disable-model-invocation: true` — the operator types
+//      /<name>; the model never picks an install from its context.
 //
 // Everything is stubbed — no network, no git, no pnpm add — so this runs in
 // milliseconds inside the normal vitest CI step.
@@ -30,6 +33,7 @@ import { describe, it, expect, afterAll } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { parse as parseYaml } from 'yaml';
 
 import { applySkill, fullyApplied, type ApplyEvent, type ApplyResult } from './skill-apply.js';
 import {
@@ -404,5 +408,49 @@ describe.each(SKILLS)('%s', (name) => {
       }
       return; // one sabotaged scenario per skill is enough
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Install skills are user-invoked. A capability install — every `add-*` skill,
+// and any skill carrying nc: fences — runs when the operator types `/<name>`,
+// never because the model picked it from its context. `disable-model-invocation:
+// true` keeps the description out of every coding-agent session and blocks model
+// invocation; the setup wizard and /update-skills apply skills through the
+// engine and are unaffected. Operational and meta skills stay model-invocable
+// and are not checked here. Rule documented in CLAUDE.md → Skills.
+// ---------------------------------------------------------------------------
+
+const INSTALL_SKILLS = readdirSync(SKILLS_DIR).filter((n) => {
+  const p = join(SKILLS_DIR, n, 'SKILL.md');
+  return existsSync(p) && (n.startsWith('add-') || SKILLS.includes(n));
+});
+
+/** The parsed YAML frontmatter of a SKILL.md, or undefined when there is none. */
+function frontmatterOf(md: string): Record<string, unknown> | undefined {
+  const lines = md.split('\n');
+  if (lines[0] !== '---') return undefined;
+  const close = lines.indexOf('---', 1);
+  if (close === -1) return undefined;
+  const parsed: unknown = parseYaml(lines.slice(1, close).join('\n'));
+  return parsed !== null && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : undefined;
+}
+
+describe('install skills are user-invoked', () => {
+  it('finds the install skills', () => {
+    expect(INSTALL_SKILLS).toContain('add-slack');
+    expect(INSTALL_SKILLS).toContain('slack-agent-flow');
+    expect(INSTALL_SKILLS.length).toBeGreaterThanOrEqual(30);
+  });
+
+  it.each(INSTALL_SKILLS)('%s declares disable-model-invocation: true', (name) => {
+    const fm = frontmatterOf(readFileSync(join(SKILLS_DIR, name, 'SKILL.md'), 'utf8'));
+    expect(fm, `${name}/SKILL.md has no parseable YAML frontmatter`).toBeDefined();
+    // The YAML value must be the boolean true — `disable-model-invocation:true`
+    // (no space) parses as a scalar, not a key, and Claude Code would ignore it.
+    expect(
+      fm!['disable-model-invocation'],
+      `${name}/SKILL.md frontmatter must carry \`disable-model-invocation: true\` — install skills are applied on demand by the operator, never picked by the model (see CLAUDE.md → Skills)`,
+    ).toBe(true);
   });
 });

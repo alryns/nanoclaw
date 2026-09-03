@@ -31,7 +31,7 @@ describe('provider skill descriptors', () => {
       offered: true,
       skillDir: path.join('.claude', 'skills', 'add-codex'),
     });
-    expect(listInstallableProviderDescriptors().map((entry) => entry.value)).toEqual(['codex']);
+    expect(listInstallableProviderDescriptors().map((entry) => entry.value)).toEqual(['codex', 'cursor']);
     expect(providerImagePolicy('CODEX')).toBe('local-required');
     expect(providerImagePolicy('claude')).toBe('hardened-compatible');
     expect(providerImagePolicy('unknown-provider')).toBe('local-required');
@@ -42,7 +42,7 @@ describe('provider skill descriptors', () => {
     // providers plus listInstallableProviderDescriptors(). OpenCode is a
     // skill-only provider: hidden from the offer AND never registered with
     // setup, so neither source can surface it.
-    expect(listInstallableProviderDescriptors().map((entry) => entry.value)).toEqual(['codex']);
+    expect(listInstallableProviderDescriptors().map((entry) => entry.value)).toEqual(['codex', 'cursor']);
     const opencode = listProviderDescriptors().find((entry) => entry.value === 'opencode');
     expect(opencode?.offered).toBe(false);
     expect(getInstallableProviderDescriptor('opencode')).toBeUndefined();

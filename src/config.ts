@@ -21,6 +21,10 @@ const envConfig = readEnvFile([
   'NANOCLAW_EGRESS_LOCKDOWN',
   'NANOCLAW_EGRESS_NETWORK',
   'ONECLI_GATEWAY_CONTAINER',
+  'AGENT_HTTP_PROXY',
+  'AGENT_NO_PROXY',
+  'TWYN_POCKETBASE_URL',
+  'TWYN_WEB_PORT',
 ]);
 
 /**
@@ -112,6 +116,18 @@ export const EGRESS_NETWORK =
   process.env.NANOCLAW_EGRESS_NETWORK || envConfig.NANOCLAW_EGRESS_NETWORK || 'nanoclaw-egress';
 export const ONECLI_GATEWAY_CONTAINER =
   process.env.ONECLI_GATEWAY_CONTAINER || envConfig.ONECLI_GATEWAY_CONTAINER || 'onecli';
+
+// Agent egress proxy. Empty preserves upstream's direct-container environment;
+// deployments using the internal egress network opt in with their gateway URL.
+export const AGENT_HTTP_PROXY = process.env.AGENT_HTTP_PROXY || envConfig.AGENT_HTTP_PROXY || '';
+export const AGENT_NO_PROXY = process.env.AGENT_NO_PROXY || envConfig.AGENT_NO_PROXY || '';
+
+// TwynOracle's authenticated web surface talks to PocketBase on the loopback
+// service by default. The listener remains local; the platform's front door
+// is responsible for exposing it under its authenticated route.
+export const TWYN_POCKETBASE_URL =
+  process.env.TWYN_POCKETBASE_URL || envConfig.TWYN_POCKETBASE_URL || 'http://127.0.0.1:8090';
+export const TWYN_WEB_PORT = Number(process.env.TWYN_WEB_PORT || envConfig.TWYN_WEB_PORT || '8091');
 
 // Timezone for scheduled tasks, message formatting, etc.
 // Validates each candidate is a real IANA identifier before accepting.

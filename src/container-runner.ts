@@ -20,6 +20,8 @@ import {
   CONTAINER_MEMORY_LIMIT,
   CONTAINER_PIDS_LIMIT,
   DATA_DIR,
+  AGENT_HTTP_PROXY,
+  AGENT_NO_PROXY,
   GROUPS_DIR,
   INSTALL_SLUG,
   TIMEZONE,
@@ -968,6 +970,7 @@ export function composeSessionSpec(input: ComposeSessionSpecInput): SessionSpec 
   const env: Record<string, string> = {
     TZ: containerConfig.timezone ?? TIMEZONE,
     ...mailboxEnvironment,
+    ...agentProxyEnvironment(),
   };
   // The contributed lane (ContainerSpec.contributedEnv): registry-sourced env,
   // exempt from the credential-NAME check and still refused credential VALUES.
@@ -1048,6 +1051,25 @@ export function composeSessionSpec(input: ComposeSessionSpecInput): SessionSpec 
     runtimeTier: containerConfig.runtimeTier ?? 'container',
     runAs,
     stopGraceSeconds: STOP_GRACE_SECONDS,
+  };
+}
+
+/**
+ * The egress lockdown topology only provides a reachable gateway; HTTP
+ * clients still need an explicit proxy setting to use it. Keep this empty
+ * unless the operator opts in, so existing containers retain their exact
+ * upstream environment. Both casings are intentional: CLI tools disagree on
+ * which spelling they honor.
+ */
+export function agentProxyEnvironment(httpProxy = AGENT_HTTP_PROXY, noProxy = AGENT_NO_PROXY): Record<string, string> {
+  if (!httpProxy) return {};
+  return {
+    HTTP_PROXY: httpProxy,
+    HTTPS_PROXY: httpProxy,
+    http_proxy: httpProxy,
+    https_proxy: httpProxy,
+    NO_PROXY: noProxy,
+    no_proxy: noProxy,
   };
 }
 

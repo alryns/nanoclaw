@@ -1,0 +1,303 @@
+/** Web channel adapter tests: PocketBase auth, transcript streaming, and SSE delivery. */
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+import type { InboundEvent } from './adapter.js';
+import type { HistoryRow } from '../modules/cross-session-context/index.js';
+
+const transcript = vi.hoisted(() => ({
+  findSessionByAgentGroup: vi.fn(),
+  getMessagingGroupAgents: vi.fn(),
+  getMessagingGroupByPlatform: vi.fn(),
+  sessionHistory: vi.fn(),
+}));
+
+// A fixed test port keeps the actual browser-facing HTTP path under test while
+// leaving the running install's configured listener untouched.
+vi.mock('../config.js', async () => {
+  const actual = await vi.importActual<typeof import('../config.js')>('../config.js');
+  return { ...actual, TWYN_WEB_PORT: 18091 };
+});
+
+vi.mock('../db/messaging-groups.js', () => ({
+  getMessagingGroupAgents: transcript.getMessagingGroupAgents,
+  getMessagingGroupByPlatform: transcript.getMessagingGroupByPlatform,
+}));
+
+vi.mock('../db/sessions.js', () => ({ findSessionByAgentGroup: transcript.findSessionByAgentGroup }));
+
+vi.mock('../modules/cross-session-context/index.js', () => ({
+  HISTORY_DEFAULT_LIMIT: 50,
+  sessionHistory: transcript.sessionHistory,
+}));
+
+import { createWebAdapter } from './web.js';
+
+const nativeFetch = globalThis.fetch;
+const fetchMock = vi.fn();
+
+let adapter: ReturnType<typeof createWebAdapter>;
+let inbound: InboundEvent[];
+let historyRows: HistoryRow[];
+
+interface OpenStream {
+  close(): Promise<void>;
+  next(): Promise<HistoryRow & { backfill: boolean }>;
+}
+
+function eventFromInbound(platformId: string, threadId: string | null, message: InboundEvent['message']): InboundEvent {
+  return { channelType: 'web', platformId, threadId, message };
+}
+
+function messageUrl(): string {
+  return 'http://127.0.0.1:18091/web/message';
+}
+
+function streamUrl(): string {
+  return 'http://127.0.0.1:18091/web/stream';
+}
+
+function row(
+  text: string,
+  timestamp: string,
+  direction: HistoryRow['direction'] = 'out',
+  sender = direction === 'out' ? 'Agent' : 'Slack user',
+): HistoryRow {
+  return { timestamp, direction, kind: 'chat', sender, text };
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function openStream(token = 'stream-token'): Promise<OpenStream> {
+  const response = await nativeFetch(streamUrl(), { headers: { Authorization: `Bearer ${token}` } });
+  const reader = response.body?.getReader();
+  expect(response.status).toBe(200);
+  expect(reader).toBeDefined();
+
+  let buffer = '';
+  return {
+    async close(): Promise<void> {
+      await reader!.cancel();
+    },
+    async next(): Promise<HistoryRow & { backfill: boolean }> {
+      for (;;) {
+        const boundary = buffer.indexOf('\n\n');
+        if (boundary >= 0) {
+          const event = buffer.slice(0, boundary);
+          buffer = buffer.slice(boundary + 2);
+          if (event.startsWith(':')) continue;
+          const data = event
+            .split('\n')
+            .filter((line) => line.startsWith('data:'))
+            .map((line) => line.slice('data:'.length).trimStart())
+            .join('\n');
+          return JSON.parse(data) as HistoryRow & { backfill: boolean };
+        }
+        const chunk = await reader!.read();
+        if (chunk.done) throw new Error('SSE stream ended before the next event');
+        buffer += new TextDecoder().decode(chunk.value);
+      }
+    },
+  };
+}
+
+async function waitForInitialTranscriptRead(): Promise<void> {
+  await vi.waitFor(() => expect(transcript.sessionHistory).toHaveBeenCalled(), { timeout: 500 });
+}
+
+beforeEach(async () => {
+  inbound = [];
+  historyRows = [];
+  fetchMock.mockReset();
+  // A fresh Response per call: a Body can be read once, and real fetch never reuses one.
+  fetchMock.mockImplementation(
+    async () => new Response(JSON.stringify({ record: { id: 'user-123' } }), { status: 200 }),
+  );
+  transcript.getMessagingGroupByPlatform.mockReset();
+  transcript.getMessagingGroupAgents.mockReset();
+  transcript.findSessionByAgentGroup.mockReset();
+  transcript.sessionHistory.mockReset();
+  transcript.getMessagingGroupByPlatform.mockResolvedValue({ id: 'web-messaging-group' });
+  transcript.getMessagingGroupAgents.mockResolvedValue([{ agent_group_id: 'agent-group' }]);
+  transcript.findSessionByAgentGroup.mockResolvedValue({ id: 'shared-session' });
+  transcript.sessionHistory.mockImplementation(async () => historyRows);
+  vi.stubGlobal('fetch', fetchMock);
+  adapter = createWebAdapter({ pollIntervalMs: 20, tokenCacheMax: 2 });
+  await adapter.setup({
+    onInbound(platformId, threadId, message) {
+      inbound.push(
+        eventFromInbound(platformId, threadId, {
+          ...message,
+          content: JSON.stringify(message.content),
+        }),
+      );
+    },
+    onInboundEvent() {},
+    onMetadata() {},
+    onAction() {},
+  });
+});
+
+afterEach(async () => {
+  await adapter.teardown();
+});
+
+afterAll(() => {
+  vi.unstubAllGlobals();
+});
+
+describe('web channel', () => {
+  it('returns 401 when a message has no token', async () => {
+    const response = await nativeFetch(messageUrl(), {
+      method: 'POST',
+      body: JSON.stringify({ text: 'hello' }),
+    });
+
+    expect(response.status).toBe(401);
+    expect(inbound).toEqual([]);
+  });
+
+  it('returns 401 when PocketBase rejects the token', async () => {
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ message: 'invalid token' }), { status: 401 }));
+
+    const response = await nativeFetch(messageUrl(), {
+      method: 'POST',
+      headers: { Authorization: 'Bearer rejected-token' },
+      body: JSON.stringify({ text: 'hello' }),
+    });
+
+    expect(response.status).toBe(401);
+    expect(inbound).toEqual([]);
+  });
+
+  it('turns a valid authenticated message into one web InboundEvent', async () => {
+    const response = await nativeFetch(messageUrl(), {
+      method: 'POST',
+      headers: { Authorization: 'Bearer valid-token' },
+      body: JSON.stringify({ text: 'hello agent' }),
+    });
+
+    expect(response.status).toBe(202);
+    expect(inbound).toHaveLength(1);
+    expect(inbound[0]).toMatchObject({
+      channelType: 'web',
+      platformId: 'web:user-123',
+      threadId: null,
+      message: {
+        kind: 'chat',
+        content: JSON.stringify({ text: 'hello agent', sender: 'web', senderId: 'web:user-123' }),
+      },
+    });
+  });
+
+  it('sends fresh transcript rows as marked backfill', async () => {
+    historyRows = [
+      row('Slack question', '2026-09-04T10:00:00.000Z', 'in'),
+      row('Slack answer', '2026-09-04T10:00:01.000Z'),
+    ];
+
+    const stream = await openStream();
+
+    await expect(stream.next()).resolves.toMatchObject({ text: 'Slack question', direction: 'in', backfill: true });
+    await expect(stream.next()).resolves.toMatchObject({ text: 'Slack answer', direction: 'out', backfill: true });
+    await stream.close();
+  });
+
+  it('pushes a Slack-originated reply that appears in the transcript without deliver()', async () => {
+    const stream = await openStream();
+    await waitForInitialTranscriptRead();
+    historyRows = [row('Seven', '2026-09-04T10:00:02.000Z')];
+
+    await expect(stream.next()).resolves.toMatchObject({ text: 'Seven', direction: 'out', backfill: false });
+    await stream.close();
+  });
+
+  it('delivers a web-originated outbound reply immediately through the transcript', async () => {
+    const stream = await openStream();
+    await waitForInitialTranscriptRead();
+    historyRows = [row('agent reply', '2026-09-04T10:00:03.000Z')];
+
+    await adapter.deliver('web:user-123', null, { kind: 'chat', content: { text: 'agent reply' } });
+
+    await expect(stream.next()).resolves.toMatchObject({ text: 'agent reply', backfill: false });
+    await stream.close();
+  });
+
+  it('does not render the same outbound row twice when deliver() and polling both see it', async () => {
+    const stream = await openStream();
+    await waitForInitialTranscriptRead();
+    historyRows = [row('only once', '2026-09-04T10:00:04.000Z')];
+
+    await adapter.deliver('web:user-123', null, { kind: 'chat', content: { text: 'only once' } });
+    await expect(stream.next()).resolves.toMatchObject({ text: 'only once' });
+
+    const noSecondEvent = await Promise.race([
+      stream
+        .next()
+        .then(() => false)
+        .catch(() => true),
+      delay(80).then(() => true),
+    ]);
+    expect(noSecondEvent).toBe(true);
+    await stream.close();
+  });
+
+  it('gives two connected browser clients independent complete transcript streams', async () => {
+    historyRows = [row('shared history', '2026-09-04T10:00:05.000Z')];
+
+    const first = await openStream('first-client');
+    await expect(first.next()).resolves.toMatchObject({ text: 'shared history', backfill: true });
+    const second = await openStream('second-client');
+    await expect(second.next()).resolves.toMatchObject({ text: 'shared history', backfill: true });
+
+    await first.close();
+    await second.close();
+  });
+
+  it('stops transcript reads after the last SSE client disconnects', async () => {
+    const stream = await openStream();
+    await waitForInitialTranscriptRead();
+    await stream.close();
+    await delay(30);
+    transcript.sessionHistory.mockClear();
+
+    await delay(80);
+
+    expect(transcript.sessionHistory).not.toHaveBeenCalled();
+  });
+
+  it('silently no-ops when no SSE client is connected', async () => {
+    await expect(
+      adapter.deliver('web:user-123', null, { kind: 'chat', content: { text: 'agent reply' } }),
+    ).resolves.toBeUndefined();
+  });
+
+  it('accepts an EventSource query token on the SSE endpoint', async () => {
+    const response = await nativeFetch(`${streamUrl()}?token=query-token`);
+
+    expect(response.status).toBe(200);
+    await response.body?.cancel();
+  });
+
+  it('bounds the rotating PocketBase token cache with oldest-token eviction', async () => {
+    for (const token of ['one', 'two', 'three']) {
+      const response = await nativeFetch(messageUrl(), {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ text: token }),
+      });
+      expect(response.status).toBe(202);
+    }
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+
+    const response = await nativeFetch(messageUrl(), {
+      method: 'POST',
+      headers: { Authorization: 'Bearer one' },
+      body: JSON.stringify({ text: 'one again' }),
+    });
+
+    expect(response.status).toBe(202);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+});

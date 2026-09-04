@@ -16,6 +16,7 @@ import { CONTAINER_CPU_LIMIT, CONTAINER_MEMORY_LIMIT } from './config.js';
 import type { ContainerConfig } from './container-config.js';
 import {
   armSessionLifecycle,
+  agentProxyEnvironment,
   composeSessionSpec,
   parseMemoryMb,
   parsePidsLimit,
@@ -133,6 +134,18 @@ function composeWithFolder(folder: string) {
 }
 
 describe('composeSessionSpec', () => {
+  it('adds proxy environment in both casings only when the agent proxy is configured', () => {
+    expect(agentProxyEnvironment('http://host.docker.internal:8888', 'localhost,127.0.0.1')).toEqual({
+      HTTP_PROXY: 'http://host.docker.internal:8888',
+      HTTPS_PROXY: 'http://host.docker.internal:8888',
+      http_proxy: 'http://host.docker.internal:8888',
+      https_proxy: 'http://host.docker.internal:8888',
+      NO_PROXY: 'localhost,127.0.0.1',
+      no_proxy: 'localhost,127.0.0.1',
+    });
+    expect(agentProxyEnvironment('', 'localhost,127.0.0.1')).toEqual({});
+  });
+
   it('keys the session by install, group and session id', () => {
     expect(compose().key).toMatchObject({ agentGroupId: 'agent-1', sessionId: 'session-1' });
   });

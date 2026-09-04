@@ -24,7 +24,9 @@
 //      MUST ship a fixture file (actionable failure otherwise).
 //   7. install skills are user-invoked: every add-* skill and every fence-carrying
 //      skill declares `disable-model-invocation: true` — the operator types
-//      /<name>; the model never picks an install from its context.
+//      /<name>; the model never picks an install from its context. Codex reads
+//      the same directories and needs its own switch, agents/openai.yaml with
+//      policy.allow_implicit_invocation: false, which hides the skill from its prompt.
 //
 // Everything is stubbed — no network, no git, no pnpm add — so this runs in
 // milliseconds inside the normal vitest CI step.
@@ -417,8 +419,11 @@ describe.each(SKILLS)('%s', (name) => {
 // never because the model picked it from its context. `disable-model-invocation:
 // true` keeps the description out of every coding-agent session and blocks model
 // invocation; the setup wizard and /update-skills apply skills through the
-// engine and are unaffected. Operational and meta skills stay model-invocable
-// and are not checked here. Rule documented in CLAUDE.md → Skills.
+// engine and are unaffected. Codex reads the same directories through the
+// .agents/skills symlink and has its own switch: agents/openai.yaml with
+// policy.allow_implicit_invocation: false hides the skill from its prompt until the
+// user mentions $<name>. Operational and meta skills stay model-invocable and are
+// not checked here. Rule documented in CLAUDE.md → Skills.
 // ---------------------------------------------------------------------------
 
 const INSTALL_SKILLS = readdirSync(SKILLS_DIR).filter((n) => {
@@ -452,5 +457,18 @@ describe('install skills are user-invoked', () => {
       fm!['disable-model-invocation'],
       `${name}/SKILL.md frontmatter must carry \`disable-model-invocation: true\` — install skills are applied on demand by the operator, never picked by the model (see CLAUDE.md → Skills)`,
     ).toBe(true);
+  });
+
+  it.each(INSTALL_SKILLS)('%s ships agents/openai.yaml with allow_implicit_invocation: false', (name) => {
+    const p = join(SKILLS_DIR, name, 'agents', 'openai.yaml');
+    expect(
+      existsSync(p),
+      `${name}/agents/openai.yaml is missing — Codex reads the same skill directory and hides an install skill from its prompt only through policy.allow_implicit_invocation: false`,
+    ).toBe(true);
+    const parsed = parseYaml(readFileSync(p, 'utf8')) as { policy?: { allow_implicit_invocation?: unknown } };
+    expect(
+      parsed?.policy?.allow_implicit_invocation,
+      `${name}/agents/openai.yaml must set policy.allow_implicit_invocation: false`,
+    ).toBe(false);
   });
 });

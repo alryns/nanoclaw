@@ -171,6 +171,17 @@ describe('web channel', () => {
     expect(inbound).toEqual([]);
   });
 
+  it('verifies the token with a POST to auth-refresh (a GET would hit the SPA fallback)', async () => {
+    await nativeFetch(messageUrl(), {
+      method: 'POST',
+      headers: { Authorization: 'Bearer t' },
+      body: JSON.stringify({ text: 'x' }),
+    });
+    const call = fetchMock.mock.calls.find(([url]) => /\/api\/collections\/users\/auth-refresh$/.test(String(url)));
+    expect(call).toBeDefined();
+    expect((call?.[1] as RequestInit | undefined)?.method).toBe('POST');
+  });
+
   it('turns a valid authenticated message into one web InboundEvent', async () => {
     const response = await nativeFetch(messageUrl(), {
       method: 'POST',

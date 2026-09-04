@@ -25,6 +25,8 @@ const envConfig = readEnvFile([
   'AGENT_NO_PROXY',
   'TWYN_POCKETBASE_URL',
   'TWYN_WEB_PORT',
+  'TWYN_WEB_HOST',
+  'NANOCLAW_MCP_PLAIN_HTTP_HOSTS',
 ]);
 
 /**
@@ -128,6 +130,22 @@ export const AGENT_NO_PROXY = process.env.AGENT_NO_PROXY || envConfig.AGENT_NO_P
 export const TWYN_POCKETBASE_URL =
   process.env.TWYN_POCKETBASE_URL || envConfig.TWYN_POCKETBASE_URL || 'http://127.0.0.1:8090';
 export const TWYN_WEB_PORT = Number(process.env.TWYN_WEB_PORT || envConfig.TWYN_WEB_PORT || '8091');
+// Hostnames an MCP server URL may use over plain HTTP in addition to loopback and
+// host.docker.internal. Upstream's policy assumes credentialed MCP traffic goes through
+// OneCLI; a deployment that runs a shared MCP service on an internal container network
+// (no OneCLI, no TLS hop) names that service here. Comma-separated; empty = upstream policy.
+export const MCP_PLAIN_HTTP_HOSTS = (
+  process.env.NANOCLAW_MCP_PLAIN_HTTP_HOSTS ||
+  envConfig.NANOCLAW_MCP_PLAIN_HTTP_HOSTS ||
+  ''
+)
+  .split(',')
+  .map((h) => h.trim().toLowerCase())
+  .filter(Boolean);
+
+// Bind address for the web adapter. Loopback by default (a bare-host install); a
+// containerised host sets 0.0.0.0 and lets the port binding decide who can reach it.
+export const TWYN_WEB_HOST = process.env.TWYN_WEB_HOST || envConfig.TWYN_WEB_HOST || '127.0.0.1';
 
 // Timezone for scheduled tasks, message formatting, etc.
 // Validates each candidate is a real IANA identifier before accepting.

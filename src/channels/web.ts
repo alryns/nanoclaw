@@ -9,7 +9,7 @@
 import { randomUUID } from 'crypto';
 import http, { type IncomingMessage, type ServerResponse } from 'http';
 
-import { TWYN_POCKETBASE_URL, TWYN_WEB_PORT } from '../config.js';
+import { TWYN_POCKETBASE_URL, TWYN_WEB_HOST, TWYN_WEB_PORT } from '../config.js';
 import { getMessagingGroupAgents, getMessagingGroupByPlatform } from '../db/messaging-groups.js';
 import { findSessionByAgentGroup } from '../db/sessions.js';
 import { log } from '../log.js';
@@ -147,7 +147,10 @@ export function createWebAdapter(options: WebAdapterOptions = {}): ChannelAdapte
     if (cached) return cached.id;
 
     try {
+      // POST: PocketBase only serves auth-refresh as POST; a GET falls through to the SPA
+      // and returns index.html, which read as "token invalid" until this was fixed.
       const response = await fetch(`${TWYN_POCKETBASE_URL}/api/collections/users/auth-refresh`, {
+        method: 'POST',
         headers: { Authorization: `Bearer ${token}` },
       });
       if (!response.ok) return null;
@@ -279,8 +282,8 @@ export function createWebAdapter(options: WebAdapterOptions = {}): ChannelAdapte
       });
       await new Promise<void>((resolve, reject) => {
         server!.once('error', reject);
-        server!.listen(port, '127.0.0.1', () => {
-          log.info('Web channel listening', { host: '127.0.0.1', port });
+        server!.listen(port, TWYN_WEB_HOST, () => {
+          log.info('Web channel listening', { host: TWYN_WEB_HOST, port });
           resolve();
         });
       });

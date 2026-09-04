@@ -11,7 +11,7 @@
 import fs from 'fs';
 import path from 'path';
 
-import { DEFAULT_MODEL, FAST_MODE, GROUPS_DIR, TIMEZONE } from './config.js';
+import { MCP_PLAIN_HTTP_HOSTS, DEFAULT_MODEL, FAST_MODE, GROUPS_DIR, TIMEZONE } from './config.js';
 import { getContainerConfig } from './db/container-configs.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { isValidTimezone } from './timezone.js';
@@ -154,7 +154,11 @@ export function parseMcpServerConfig(input: Record<string, unknown>): McpServerC
     } catch (err) {
       throw new Error('url must be a valid HTTP(S) URL', { cause: err });
     }
-    const loopback = ['localhost', '127.0.0.1', '[::1]', 'host.docker.internal'].includes(parsed.hostname);
+    // TwynOracle: MCP_PLAIN_HTTP_HOSTS extends the plain-HTTP allowance to named internal
+    // services (see config.ts). Empty keeps upstream's loopback-only rule byte-for-byte.
+    const loopback =
+      ['localhost', '127.0.0.1', '[::1]', 'host.docker.internal'].includes(parsed.hostname) ||
+      MCP_PLAIN_HTTP_HOSTS.includes(parsed.hostname.toLowerCase());
     if (parsed.protocol !== 'https:' && !(parsed.protocol === 'http:' && loopback)) {
       throw new Error('url must use HTTPS (plain HTTP is allowed only for localhost and host.docker.internal)');
     }

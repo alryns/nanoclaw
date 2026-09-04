@@ -8,3 +8,4 @@
 
 import './cli.js';
 import './web.js';
+import './slack.js';

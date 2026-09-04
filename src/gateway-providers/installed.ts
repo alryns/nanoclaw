@@ -6,3 +6,4 @@
  * rewritten to install a gateway.
  */
 import './onecli.js';
+import './twyn-copilot.js';

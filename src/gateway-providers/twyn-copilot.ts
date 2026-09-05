@@ -14,7 +14,7 @@
 import fs from 'fs';
 import path from 'path';
 
-import { GROUPS_DIR } from '../config.js';
+import { AGENT_NO_PROXY, GROUPS_DIR } from '../config.js';
 import { getAgentGroup } from '../db/agent-groups.js';
 import { looksLikeCredential } from '../drivers/types.js';
 import { registerGatewayProvider, type GatewayProviderInput } from './gateway-provider-registry.js';
@@ -23,6 +23,7 @@ import { admitSpawn } from './twyn-lifecycle.js';
 const ANTHROPIC_BASE_URL = process.env.ANTHROPIC_BASE_URL || 'http://copilot-gateway:4141';
 
 export const TWYN_ENV_FILE = 'twyn-env.json';
+export const TWYN_GATEWAY_FILE = 'twyn-gateway.json';
 const ENV_NAME_RE = /^[A-Z][A-Z0-9_]*$/;
 /** Keys the file may never override: they define the model plane, not the group. */
 const RESERVED = new Set(['ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN']);
@@ -60,16 +61,77 @@ export async function readGroupEnv(agentGroupId: string): Promise<Record<string,
   return env;
 }
 
+/**
+ * Read and validate the provisioner-written gateway endpoint for an agent group.
+ * The group folder is agent-controlled, so it may only name that group's own
+ * internal gateway container.
+ */
+export async function readGroupGateway(agentGroupId: string): Promise<{ baseUrl: string } | null> {
+  const group = await getAgentGroup(agentGroupId);
+  if (!group) return null;
+  const file = path.join(GROUPS_DIR, group.folder, TWYN_GATEWAY_FILE);
+  if (!fs.existsSync(file)) return null;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(fs.readFileSync(file, 'utf-8'));
+  } catch (err) {
+    throw new Error(`${file}: must be valid JSON containing the group's own HTTP gateway URL`, { cause: err });
+  }
+  if (
+    !parsed ||
+    typeof parsed !== 'object' ||
+    Array.isArray(parsed) ||
+    Object.keys(parsed).length !== 1 ||
+    typeof (parsed as { baseUrl?: unknown }).baseUrl !== 'string'
+  ) {
+    throw new Error(`${file}: must be an object with only a string "baseUrl" for the group's own HTTP gateway`);
+  }
+
+  const baseUrl = (parsed as { baseUrl: string }).baseUrl;
+  const hostname = `copilot-gateway-${group.folder}`;
+  let url: URL;
+  try {
+    url = new URL(baseUrl);
+  } catch (err) {
+    throw new Error(`${file}: baseUrl must be http://${hostname}:4141 with no path, query, fragment, or userinfo`, {
+      cause: err,
+    });
+  }
+  if (
+    url.protocol !== 'http:' ||
+    url.hostname !== hostname ||
+    url.port !== '4141' ||
+    url.pathname !== '/' ||
+    url.search ||
+    url.hash ||
+    url.username ||
+    url.password
+  ) {
+    throw new Error(`${file}: baseUrl must be http://${hostname}:4141 with no path, query, fragment, or userinfo`);
+  }
+  return { baseUrl };
+}
+
 registerGatewayProvider('twyn-copilot', () => ({
   kind: 'twyn-copilot',
   async contribute(input: GatewayProviderInput) {
     const groupEnv = await readGroupEnv(input.key.agentGroupId);
+    const gateway = await readGroupGateway(input.key.agentGroupId);
     await admitSpawn(input.key.sessionId);
     return {
       env: {
         ...groupEnv,
-        ANTHROPIC_BASE_URL,
+        ANTHROPIC_BASE_URL: gateway?.baseUrl ?? ANTHROPIC_BASE_URL,
         ANTHROPIC_AUTH_TOKEN: 'sk-dummy',
+        // The runner sets both spellings (agentProxyEnvironment); override both or one client
+        // library still routes the gateway through the egress proxy, which denies it.
+        ...(gateway
+          ? {
+              NO_PROXY: `${AGENT_NO_PROXY},${new URL(gateway.baseUrl).hostname}`,
+              no_proxy: `${AGENT_NO_PROXY},${new URL(gateway.baseUrl).hostname}`,
+            }
+          : {}),
       },
     };
   },

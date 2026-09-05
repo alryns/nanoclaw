@@ -18,7 +18,8 @@ vi.mock('../db/agent-groups.js', () => ({
 
 import { validateSpec, type SessionSpec } from '../drivers/types.js';
 import { getGatewayProvider, resetGatewayProvider } from './index.js';
-import { TWYN_ENV_FILE } from './twyn-copilot.js';
+import { AGENT_NO_PROXY } from '../config.js';
+import { TWYN_ENV_FILE, TWYN_GATEWAY_FILE } from './twyn-copilot.js';
 import { _resetTwynLifecycleForTesting } from './twyn-lifecycle.js';
 
 const input = {
@@ -36,12 +37,14 @@ const input = {
   },
 };
 const envFile = path.join(groupsDir, 'spike', TWYN_ENV_FILE);
+const gatewayFile = path.join(groupsDir, 'spike', TWYN_GATEWAY_FILE);
 
 beforeEach(() => {
   _resetTwynLifecycleForTesting();
   vi.stubEnv('NANOCLAW_GATEWAY_PROVIDER', 'twyn-copilot');
   fs.mkdirSync(path.dirname(envFile), { recursive: true });
   fs.rmSync(envFile, { force: true });
+  fs.rmSync(gatewayFile, { force: true });
 });
 afterEach(() => {
   _resetTwynLifecycleForTesting();
@@ -96,6 +99,40 @@ describe('twyn-copilot gateway provider', () => {
       key: { ...input.key, agentGroupId: 'missing', sessionId: 'session-2' },
     });
     expect(Object.keys(other.env ?? {}).length).toBe(2);
+  });
+
+  it('uses a valid per-group gateway and bypasses the egress proxy for it', async () => {
+    fs.writeFileSync(gatewayFile, JSON.stringify({ baseUrl: 'http://copilot-gateway-spike:4141' }));
+
+    const { env } = await getGatewayProvider().contribute(input);
+
+    expect(env).toMatchObject({
+      ANTHROPIC_BASE_URL: 'http://copilot-gateway-spike:4141',
+      NO_PROXY: `${AGENT_NO_PROXY},copilot-gateway-spike`,
+      no_proxy: `${AGENT_NO_PROXY},copilot-gateway-spike`,
+    });
+  });
+
+  it.each([
+    ['another group hostname', { baseUrl: 'http://copilot-gateway-other:4141' }],
+    ['https', { baseUrl: 'https://copilot-gateway-spike:4141' }],
+    ['an extra path', { baseUrl: 'http://copilot-gateway-spike:4141/api' }],
+    ['the wrong port', { baseUrl: 'http://copilot-gateway-spike:4142' }],
+    ['userinfo', { baseUrl: 'http://user@copilot-gateway-spike:4141' }],
+  ])('refuses a gateway file with %s', async (_description, value) => {
+    fs.writeFileSync(gatewayFile, JSON.stringify(value));
+
+    await expect(getGatewayProvider().contribute(input)).rejects.toThrow(
+      new RegExp(`${TWYN_GATEWAY_FILE.replace('.', '\\.')}: baseUrl must be`),
+    );
+  });
+
+  it('refuses malformed gateway JSON', async () => {
+    fs.writeFileSync(gatewayFile, '{ not json');
+
+    await expect(getGatewayProvider().contribute(input)).rejects.toThrow(
+      new RegExp(`${TWYN_GATEWAY_FILE.replace('.', '\\.')}: must be valid JSON`),
+    );
   });
 
   it('fails closed on malformed JSON, non-string values, bad names and reserved keys', async () => {

@@ -12,7 +12,7 @@ import http, { type IncomingMessage, type ServerResponse } from 'http';
 import path from 'path';
 
 import { isSafeAttachmentName } from '../attachment-safety.js';
-import { TWYN_POCKETBASE_URL, TWYN_WEB_HOST, TWYN_WEB_PORT } from '../config.js';
+import { DATA_DIR, TWYN_POCKETBASE_URL, TWYN_WEB_HOST, TWYN_WEB_PORT } from '../config.js';
 import { getMessagingGroupAgents, getMessagingGroupByPlatform } from '../db/messaging-groups.js';
 import { findSessionByAgentGroup } from '../db/sessions.js';
 import { log } from '../log.js';
@@ -27,6 +27,7 @@ const HEARTBEAT_MS = 25_000;
 const TRANSCRIPT_POLL_MS = 1_000;
 const WEB_TOOLS = new Set(['twyn-ask', 'twyn-query', 'twyn-portal-nav', 'twyn-repo-ask']);
 const WEB_MODES = new Set(['standard', 'simple', 'eli5', 'showme']);
+const WEB_FILES_ROOT = path.join(DATA_DIR, 'web-files');
 
 /**
  * A browser session is a private authenticated DM: every submitted message is
@@ -142,6 +143,59 @@ function isPathWithin(root: string, candidate: string): boolean {
   return candidate.startsWith(`${root}${path.sep}`);
 }
 
+function safeWebFilePath(
+  agentGroupId: string,
+  sessionId: string,
+  messageId: string,
+  filename: string,
+): string | undefined {
+  if (![agentGroupId, sessionId, messageId, filename].every(isSafeAttachmentName)) return undefined;
+  return path.join(WEB_FILES_ROOT, agentGroupId, sessionId, messageId, filename);
+}
+
+function checkedWebFilesDirectory(agentGroupId: string, sessionId: string, messageId: string): string | undefined {
+  if (![agentGroupId, sessionId, messageId].every(isSafeAttachmentName)) return undefined;
+  try {
+    fs.mkdirSync(WEB_FILES_ROOT, { recursive: true, mode: 0o700 });
+    const rootStat = fs.lstatSync(WEB_FILES_ROOT);
+    if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) return undefined;
+    const realRoot = fs.realpathSync(WEB_FILES_ROOT);
+    let directory = WEB_FILES_ROOT;
+    for (const component of [agentGroupId, sessionId, messageId]) {
+      directory = path.join(directory, component);
+      fs.mkdirSync(directory, { mode: 0o700 });
+      const stat = fs.lstatSync(directory);
+      if (!stat.isDirectory() || stat.isSymbolicLink() || !isPathWithin(realRoot, fs.realpathSync(directory))) {
+        return undefined;
+      }
+    }
+    return directory;
+  } catch {
+    return undefined;
+  }
+}
+
+function readStoredWebFile(
+  agentGroupId: string,
+  sessionId: string,
+  messageId: string,
+  filename: string,
+): Buffer | undefined {
+  const filePath = safeWebFilePath(agentGroupId, sessionId, messageId, filename);
+  if (!filePath) return undefined;
+  try {
+    const rootStat = fs.lstatSync(WEB_FILES_ROOT);
+    if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) return undefined;
+    const realRoot = fs.realpathSync(WEB_FILES_ROOT);
+    const stat = fs.lstatSync(filePath);
+    if (!stat.isFile() || stat.isSymbolicLink()) return undefined;
+    const realFile = fs.realpathSync(filePath);
+    return isPathWithin(realRoot, realFile) ? fs.readFileSync(realFile) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 async function readJsonBody(req: IncomingMessage): Promise<unknown> {
   let body = '';
   for await (const chunk of req) {
@@ -252,6 +306,63 @@ export function createWebAdapter(options: WebAdapterOptions = {}): ChannelAdapte
     const [wiring] = await getMessagingGroupAgents(messagingGroup.id);
     if (!wiring) return null;
     return (await findSessionByAgentGroup(wiring.agent_group_id)) ?? null;
+  }
+
+  async function storeWebFiles(platformId: string, message: OutboundMessage): Promise<void> {
+    if (!Array.isArray(message.files) || message.files.length === 0) return;
+    try {
+      const session = await resolveSession(platformId);
+      if (!session) return;
+      const content = message.content;
+      let messageId: string | undefined =
+        content && typeof content === 'object' && typeof (content as Record<string, unknown>).id === 'string'
+          ? ((content as Record<string, unknown>).id as string)
+          : undefined;
+      if (!messageId) {
+        const names = message.files.map((file) => file.filename);
+        const rows = await sessionHistory({ id: session.id, limit: HISTORY_DEFAULT_LIMIT }, { caller: 'host' });
+        messageId = [...rows]
+          .reverse()
+          .find(
+            (row) =>
+              row.direction === 'out' &&
+              row.messageId &&
+              row.files?.length === names.length &&
+              row.files.every((filename, index) => filename === names[index]),
+          )?.messageId;
+      }
+      if (!messageId) {
+        log.warn('Web channel could not identify outbound message for retained files', { platformId });
+        return;
+      }
+      const directory = checkedWebFilesDirectory(session.agent_group_id, session.id, messageId);
+      if (!directory) {
+        log.warn('Web channel refused unsafe retained-file destination', { platformId, messageId });
+        return;
+      }
+      for (const file of message.files) {
+        if (!isSafeAttachmentName(file.filename)) {
+          log.warn('Web channel refused unsafe retained filename', { messageId, filename: file.filename });
+          continue;
+        }
+        const target = path.join(directory, file.filename);
+        const temporary = path.join(directory, `.${randomUUID()}.tmp`);
+        try {
+          fs.writeFileSync(temporary, file.data, { flag: 'wx', mode: 0o600 });
+          fs.renameSync(temporary, target);
+          fs.chmodSync(target, 0o600);
+        } catch (err) {
+          try {
+            fs.unlinkSync(temporary);
+          } catch {
+            // The temporary file was never created, or rename already consumed it.
+          }
+          log.warn('Web channel failed to retain outbound file', { err, messageId, filename: file.filename });
+        }
+      }
+    } catch (err) {
+      log.warn('Web channel failed to retain outbound files', { err, platformId });
+    }
   }
 
   function emitTranscript(client: WebStreamClient, row: HistoryRow, backfill: boolean): void {
@@ -384,6 +495,7 @@ export function createWebAdapter(options: WebAdapterOptions = {}): ChannelAdapte
     },
 
     async deliver(platformId, _threadId, message: OutboundMessage): Promise<string | undefined> {
+      await storeWebFiles(platformId, message);
       if (extractText(message) === null || !streams.has(platformId)) return undefined;
       // Delivery runs after the outbound row is durable. Refreshing now sends
       // its canonical transcript row immediately; the per-client high-water
@@ -431,9 +543,12 @@ export function createWebAdapter(options: WebAdapterOptions = {}): ChannelAdapte
         sendStatus(res, 401);
         return;
       }
-      const file = readOutboxFiles(session.agent_group_id, session.id, messageId, [filename])?.find(
-        (candidate) => candidate.filename === filename,
-      );
+      const storedData = readStoredWebFile(session.agent_group_id, session.id, messageId, filename);
+      const file = storedData
+        ? { filename, data: storedData }
+        : readOutboxFiles(session.agent_group_id, session.id, messageId, [filename])?.find(
+            (candidate) => candidate.filename === filename,
+          );
       if (!file) {
         res.writeHead(404).end();
         return;

@@ -14,12 +14,13 @@ const transcript = vi.hoisted(() => ({
   readOutboxFiles: vi.fn(),
   sessionHistory: vi.fn(),
 }));
+const WEB_FILES_TEST_DATA_DIR = vi.hoisted(() => '/tmp/nanoclaw-web-files-test');
 
 // A fixed test port keeps the actual browser-facing HTTP path under test while
 // leaving the running install's configured listener untouched.
 vi.mock('../config.js', async () => {
   const actual = await vi.importActual<typeof import('../config.js')>('../config.js');
-  return { ...actual, TWYN_WEB_PORT: 18091 };
+  return { ...actual, DATA_DIR: WEB_FILES_TEST_DATA_DIR, TWYN_WEB_PORT: 18091 };
 });
 
 vi.mock('../db/messaging-groups.js', () => ({
@@ -125,6 +126,7 @@ async function waitForInitialTranscriptRead(): Promise<void> {
 }
 
 beforeEach(async () => {
+  fs.rmSync(WEB_FILES_TEST_DATA_DIR, { recursive: true, force: true });
   inbound = [];
   historyRows = [];
   fetchMock.mockReset();
@@ -161,6 +163,7 @@ beforeEach(async () => {
 afterEach(async () => {
   await adapter.teardown();
   vi.unstubAllEnvs();
+  fs.rmSync(WEB_FILES_TEST_DATA_DIR, { recursive: true, force: true });
 });
 
 afterAll(() => {
@@ -244,6 +247,55 @@ describe('web channel', () => {
     expect(response.headers.get('cache-control')).toBe('private, no-store');
     expect(response.headers.get('content-disposition')).toBe('inline; filename="report.html"');
     await expect(response.text()).resolves.toBe('<h1>Report</h1>');
+  });
+
+  it('retains delivered files and serves the retained html copy after outbox cleanup', async () => {
+    historyRows = [
+      { ...row('download ready', '2026-09-04T10:00:00.000Z'), messageId: 'msg-web-files', files: ['hello.html'] },
+    ];
+    await adapter.deliver('web:user-123', null, {
+      kind: 'chat',
+      content: { text: 'download ready', files: ['hello.html'] },
+      files: [{ filename: 'hello.html', data: Buffer.from('<h1>Hello</h1>') }],
+    });
+    expect(
+      fs.readFileSync(
+        path.join(WEB_FILES_TEST_DATA_DIR, 'web-files', 'agent-group', 'shared-session', 'msg-web-files', 'hello.html'),
+        'utf8',
+      ),
+    ).toBe('<h1>Hello</h1>');
+    transcript.readOutboxFiles.mockReturnValue(undefined);
+
+    const response = await nativeFetch(fileUrl('?message=msg-web-files&name=hello.html'), {
+      headers: { Authorization: 'Bearer retained-file-token' },
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('content-security-policy')).toBe('sandbox allow-scripts');
+    await expect(response.text()).resolves.toBe('<h1>Hello</h1>');
+    expect(transcript.readOutboxFiles).not.toHaveBeenCalled();
+  });
+
+  it('refuses to retain a file whose name has a path separator', async () => {
+    await adapter.deliver('web:user-123', null, {
+      kind: 'chat',
+      content: { id: 'msg-unsafe-file', text: 'unsafe' },
+      files: [{ filename: 'nested/hello.html', data: Buffer.from('unsafe') }],
+    });
+
+    expect(
+      fs.existsSync(
+        path.join(
+          WEB_FILES_TEST_DATA_DIR,
+          'web-files',
+          'agent-group',
+          'shared-session',
+          'msg-unsafe-file',
+          'nested',
+          'hello.html',
+        ),
+      ),
+    ).toBe(false);
   });
 
   it('returns 401 when a vault page has no token', async () => {

@@ -113,6 +113,13 @@ COPY cli-tools.json install-cli-tools.sh /tmp/
 RUN --mount=type=cache,target=/root/.cache/pnpm \
     sh /tmp/install-cli-tools.sh /tmp/cli-tools.json
 
+# ---- TwynOracle managed settings (fork knob) ---------------------------------
+# Claude Code reads /etc/claude-code/managed-settings.json above every other settings layer
+# and honours its deny rules in every permission mode. Root-owned, so the agent (uid 1000)
+# cannot edit it, unlike ~/.claude/settings.json. Content: container/managed-settings.json.
+COPY managed-settings.json /etc/claude-code/managed-settings.json
+RUN chmod 0644 /etc/claude-code/managed-settings.json
+
 # ---- ncl CLI wrapper ----------------------------------------------------------
 # Actual script lives in the mounted source at /app/src/cli/ncl.ts.
 RUN printf '#!/bin/sh\nexec bun /app/src/cli/ncl.ts "$@"\n' > /usr/local/bin/ncl && \

@@ -1,0 +1,29 @@
+{
+  "$comment": "TwynOracle managed settings for cohort agents. Root-owned in the image, so the agent cannot edit it; Claude Code enforces deny rules in every permission mode. Belt and braces over the container's physical limits (one egress host, no registries, no gh). Cohort agents answer, snapshot, chart and document; they do not ship code.",
+  "permissions": {
+    "deny": [
+      "Bash(git push:*)",
+      "Bash(git remote:*)",
+      "Bash(git clone:*)",
+      "Bash(git fetch:*)",
+      "Bash(git pull:*)",
+      "Bash(gh:*)",
+      "Bash(npm install:*)",
+      "Bash(npm i:*)",
+      "Bash(npm add:*)",
+      "Bash(npm ci:*)",
+      "Bash(pnpm install:*)",
+      "Bash(pnpm add:*)",
+      "Bash(bun install:*)",
+      "Bash(bun add:*)",
+      "Bash(npx:*)",
+      "Bash(bunx:*)",
+      "Bash(pip:*)",
+      "Bash(pip3:*)",
+      "Bash(apt:*)",
+      "Bash(apt-get:*)",
+      "Bash(curl:*)",
+      "Bash(wget:*)"
+    ]
+  }
+}

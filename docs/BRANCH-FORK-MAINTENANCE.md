@@ -75,3 +75,12 @@ Skills replaced fork setup. The short version ([CONTRIBUTING.md](../CONTRIBUTING
 ## Dependencies
 
 Registry branches add their own deps on top of upstream's. Skill `nc:dep` directives pin exact versions at install time (the supply-chain policy rejects ranges and `latest`). When upstream adds or removes a dependency, verify the registry branches still build after the next forward merge — transitive dependency changes can break adapter code.
+
+## TwynOracle fork knobs (beyond pure additions)
+
+1. `src/container-config.ts` plain-HTTP MCP hosts (`NANOCLAW_MCP_PLAIN_HTTP_HOSTS`), see the
+   TwynOracle DESIGN.md.
+2. `container/Dockerfile` copies `container/managed-settings.json` to
+   `/etc/claude-code/managed-settings.json` (two lines before the ncl wrapper). Claude Code's
+   managed layer: deny rules the agent cannot edit. On rebase, keep the COPY next to the ncl
+   wrapper block; the JSON file itself is a pure addition.

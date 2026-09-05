@@ -21,6 +21,8 @@ const AUTH_CACHE_MS = 60_000;
 const VERIFIED_USERS_MAX = 512;
 const HEARTBEAT_MS = 25_000;
 const TRANSCRIPT_POLL_MS = 1_000;
+const WEB_TOOLS = new Set(['twyn-ask', 'twyn-query', 'twyn-portal-nav', 'twyn-repo-ask']);
+const WEB_MODES = new Set(['standard', 'simple', 'eli5', 'showme']);
 
 /**
  * A browser session is a private authenticated DM: every submitted message is
@@ -94,9 +96,9 @@ async function readJsonBody(req: IncomingMessage): Promise<unknown> {
   return JSON.parse(body);
 }
 
-function sendStatus(res: ServerResponse, status: number): void {
+function sendStatus(res: ServerResponse, status: number, error?: string): void {
   res.writeHead(status, { 'Content-Type': 'application/json' });
-  res.end(status === 401 ? JSON.stringify({ error: 'unauthorized' }) : JSON.stringify({ error: 'bad request' }));
+  res.end(JSON.stringify({ error: error ?? (status === 401 ? 'unauthorized' : 'bad request') }));
 }
 
 function extractText(message: OutboundMessage): string | null {
@@ -386,12 +388,26 @@ export function createWebAdapter(options: WebAdapterOptions = {}): ChannelAdapte
           sendStatus(res, 400);
           return;
         }
+        const tool = 'tool' in payload ? payload.tool : undefined;
+        if (tool !== undefined && (typeof tool !== 'string' || !WEB_TOOLS.has(tool))) {
+          sendStatus(res, 400, 'invalid tool');
+          return;
+        }
+        const mode = 'mode' in payload ? payload.mode : 'standard';
+        if (typeof mode !== 'string' || !WEB_MODES.has(mode)) {
+          sendStatus(res, 400, 'invalid mode');
+          return;
+        }
+        const text =
+          tool === undefined && mode === 'standard'
+            ? payload.text
+            : `[twynoracle${tool ? ` tool=${tool}` : ''}${mode !== 'standard' ? ` mode=${mode}` : ''}]\n${payload.text}`;
         await config.onInbound(platformId, null, {
           id: `web-${Date.now()}-${randomUUID()}`,
           kind: 'chat',
           timestamp: new Date().toISOString(),
           isGroup: false,
-          content: { text: payload.text, sender: 'web', senderId: platformId },
+          content: { text, sender: 'web', senderId: platformId },
         });
         res.writeHead(202).end();
       } catch (err) {

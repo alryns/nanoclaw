@@ -288,6 +288,99 @@ describe('web channel', () => {
     });
   });
 
+  it('leaves text unchanged when tool and mode use their defaults', async () => {
+    const response = await nativeFetch(messageUrl(), {
+      method: 'POST',
+      headers: { Authorization: 'Bearer defaults-token' },
+      body: JSON.stringify({ text: 'hello agent' }),
+    });
+
+    expect(response.status).toBe(202);
+    expect(inbound[0]?.message.content).toBe(
+      JSON.stringify({ text: 'hello agent', sender: 'web', senderId: 'web:user-123' }),
+    );
+  });
+
+  it('prefixes a tool-only selection on its own first line', async () => {
+    const response = await nativeFetch(messageUrl(), {
+      method: 'POST',
+      headers: { Authorization: 'Bearer tool-token' },
+      body: JSON.stringify({ text: 'find this', tool: 'twyn-query' }),
+    });
+
+    expect(response.status).toBe(202);
+    expect(inbound[0]?.message.content).toBe(
+      JSON.stringify({ text: '[twynoracle tool=twyn-query]\nfind this', sender: 'web', senderId: 'web:user-123' }),
+    );
+  });
+
+  it('prefixes a mode-only selection on its own first line', async () => {
+    const response = await nativeFetch(messageUrl(), {
+      method: 'POST',
+      headers: { Authorization: 'Bearer mode-token' },
+      body: JSON.stringify({ text: 'explain this', mode: 'eli5' }),
+    });
+
+    expect(response.status).toBe(202);
+    expect(inbound[0]?.message.content).toBe(
+      JSON.stringify({ text: '[twynoracle mode=eli5]\nexplain this', sender: 'web', senderId: 'web:user-123' }),
+    );
+  });
+
+  it('prefixes both tool and mode selections on their own first line', async () => {
+    const response = await nativeFetch(messageUrl(), {
+      method: 'POST',
+      headers: { Authorization: 'Bearer both-token' },
+      body: JSON.stringify({ text: 'explain this', tool: 'twyn-query', mode: 'eli5' }),
+    });
+
+    expect(response.status).toBe(202);
+    expect(inbound[0]?.message.content).toBe(
+      JSON.stringify({
+        text: '[twynoracle tool=twyn-query mode=eli5]\nexplain this',
+        sender: 'web',
+        senderId: 'web:user-123',
+      }),
+    );
+  });
+
+  it.each([null, '', 'unknown', true, 1])('rejects invalid tool %j', async (tool) => {
+    const response = await nativeFetch(messageUrl(), {
+      method: 'POST',
+      headers: { Authorization: `Bearer invalid-tool-${String(tool)}` },
+      body: JSON.stringify({ text: 'hello', tool }),
+    });
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({ error: 'invalid tool' });
+    expect(inbound).toEqual([]);
+  });
+
+  it.each([null, '', 'unknown', true, 1])('rejects invalid mode %j', async (mode) => {
+    const response = await nativeFetch(messageUrl(), {
+      method: 'POST',
+      headers: { Authorization: `Bearer invalid-mode-${String(mode)}` },
+      body: JSON.stringify({ text: 'hello', mode }),
+    });
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({ error: 'invalid mode' });
+    expect(inbound).toEqual([]);
+  });
+
+  it('ignores an unrecognized developer field', async () => {
+    const response = await nativeFetch(messageUrl(), {
+      method: 'POST',
+      headers: { Authorization: 'Bearer developer-token' },
+      body: JSON.stringify({ text: 'hello agent', developer: true }),
+    });
+
+    expect(response.status).toBe(202);
+    expect(inbound[0]?.message.content).toBe(
+      JSON.stringify({ text: 'hello agent', sender: 'web', senderId: 'web:user-123' }),
+    );
+  });
+
   it('sends fresh transcript rows as marked backfill', async () => {
     historyRows = [
       row('Slack question', '2026-09-04T10:00:00.000Z', 'in'),

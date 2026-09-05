@@ -128,6 +128,39 @@ function contentDispositionFilename(filename: string): string {
   return filename.replace(/["\\\x00-\x1F\x7F]/g, '_');
 }
 
+/**
+ * The member's own bubble should not echo the steer line the adapter prefixed for the agent
+ * ([twynoracle tool=.. mode=..]); the stored text keeps it so the agent still sees it.
+ */
+const STEER_LINE = /^\[twynoracle(?: [a-z]+=[A-Za-z0-9-]+)*\]\n/;
+export function displayRow<T extends { direction: string; text: string }>(row: T): T {
+  if (row.direction !== 'in' || !STEER_LINE.test(row.text)) return row;
+  return { ...row, text: row.text.replace(STEER_LINE, '') };
+}
+
+/** Resolve a bare wikilink slug (no slash) to the unique <slug>.md anywhere under the docs root. */
+function resolveVaultSlug(docsRoot: string, slug: string): string | undefined {
+  if (!/^[A-Za-z0-9._-]+$/.test(slug) || slug.includes('..')) return undefined;
+  const matches: string[] = [];
+  const walk = (dir: string, depth: number): void => {
+    if (depth > 6 || matches.length > 1) return;
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (entry.isSymbolicLink()) continue;
+      if (entry.isDirectory()) walk(path.join(dir, entry.name), depth + 1);
+      else if (entry.isFile() && entry.name === `${slug}.md`) matches.push(path.join(dir, entry.name));
+    }
+  };
+  walk(docsRoot, 0);
+  matches.sort();
+  return matches.length >= 1 ? path.relative(docsRoot, matches[0]) : undefined;
+}
+
 function isSafeVaultPath(value: string | null): value is string {
   return (
     typeof value === 'string' &&
@@ -391,7 +424,7 @@ export function createWebAdapter(options: WebAdapterOptions = {}): ChannelAdapte
         }
         const backfill = client.needsBackfill;
         for (const row of rows) {
-          if (backfill || rowIsNewer(row, client.highWaterMark)) emitTranscript(client, row, backfill);
+          if (backfill || rowIsNewer(row, client.highWaterMark)) emitTranscript(client, displayRow(row), backfill);
         }
         client.needsBackfill = false;
       }
@@ -570,17 +603,22 @@ export function createWebAdapter(options: WebAdapterOptions = {}): ChannelAdapte
         res.writeHead(405).end();
         return;
       }
-      const requestedPath = url.searchParams.get('path');
-      if (!isSafeVaultPath(requestedPath)) {
-        sendStatus(res, 400);
-        return;
-      }
       const vaultRoot = path.join(
         process.env.TWYN_BUNDLE_ROOT ?? '/srv/twyn-oracle/bundle',
         'current',
         'vaults',
         'docs',
       );
+      const slug = url.searchParams.get('slug');
+      const requestedPath = slug !== null ? (resolveVaultSlug(vaultRoot, slug) ?? null) : url.searchParams.get('path');
+      if (slug !== null && requestedPath === null) {
+        res.writeHead(404).end();
+        return;
+      }
+      if (!isSafeVaultPath(requestedPath)) {
+        sendStatus(res, 400);
+        return;
+      }
       try {
         const realRoot = fs.realpathSync(vaultRoot);
         const realFile = fs.realpathSync(path.resolve(vaultRoot, requestedPath));
@@ -625,7 +663,7 @@ export function createWebAdapter(options: WebAdapterOptions = {}): ChannelAdapte
       );
       const exhausted = rows.length <= limit;
       res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-      res.end(JSON.stringify({ rows: rows.slice(-limit), exhausted }));
+      res.end(JSON.stringify({ rows: rows.slice(-limit).map(displayRow), exhausted }));
       return;
     }
 

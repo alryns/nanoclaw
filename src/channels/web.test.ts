@@ -328,6 +328,31 @@ describe('web channel', () => {
     return root;
   }
 
+  it('resolves a bare slug to the unique page under the docs root', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoclaw-web-vault-'));
+    const docsRoot = path.join(root, 'current', 'vaults', 'docs', 'wiki', 'sources');
+    fs.mkdirSync(docsRoot, { recursive: true });
+    fs.writeFileSync(path.join(docsRoot, '2026-08-29-notes.md'), '# Notes\n');
+    vi.stubEnv('TWYN_BUNDLE_ROOT', root);
+    const response = await nativeFetch(vaultUrl('?slug=2026-08-29-notes'), {
+      headers: { Authorization: 'Bearer vault-slug-token', Connection: 'close' },
+    });
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe('# Notes\n');
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it('returns 404 for an unknown slug and 400 for a slug with a slash', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoclaw-web-vault-'));
+    fs.mkdirSync(path.join(root, 'current', 'vaults', 'docs'), { recursive: true });
+    vi.stubEnv('TWYN_BUNDLE_ROOT', root);
+    const missing = await nativeFetch(vaultUrl('?slug=nope'), {
+      headers: { Authorization: 'Bearer vault-slug-token', Connection: 'close' },
+    });
+    expect(missing.status).toBe(404);
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
   it('returns 404 for a missing vault page', async () => {
     const root = vaultFixtureWithOutsideLink();
     const response = await nativeFetch(vaultUrl('?path=missing.md'), {
@@ -693,5 +718,14 @@ describe('web channel', () => {
 
     expect(response.status).toBe(202);
     expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+});
+
+describe('displayRow', () => {
+  it('strips a leading steer line from inbound rows only', async () => {
+    const { displayRow } = await import('./web.js');
+    expect(displayRow({ direction: 'in', text: '[twynoracle tool=twyn-ask mode=eli5]\nhello' }).text).toBe('hello');
+    expect(displayRow({ direction: 'in', text: 'plain' }).text).toBe('plain');
+    expect(displayRow({ direction: 'out', text: '[twynoracle mode=eli5]\nx' }).text).toBe('[twynoracle mode=eli5]\nx');
   });
 });

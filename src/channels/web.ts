@@ -196,7 +196,7 @@ function checkedWebFilesDirectory(agentGroupId: string, sessionId: string, messa
     let directory = WEB_FILES_ROOT;
     for (const component of [agentGroupId, sessionId, messageId]) {
       directory = path.join(directory, component);
-      fs.mkdirSync(directory, { mode: 0o700 });
+      fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
       const stat = fs.lstatSync(directory);
       if (!stat.isDirectory() || stat.isSymbolicLink() || !isPathWithin(realRoot, fs.realpathSync(directory))) {
         return undefined;

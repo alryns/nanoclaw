@@ -276,6 +276,24 @@ describe('web channel', () => {
     expect(transcript.readOutboxFiles).not.toHaveBeenCalled();
   });
 
+  it('retains a second file for the same session after the group and session directories exist', async () => {
+    const stored = (messageId: string, name: string) =>
+      path.join(WEB_FILES_TEST_DATA_DIR, 'web-files', 'agent-group', 'shared-session', messageId, name);
+    await adapter.deliver('web:user-123', null, {
+      kind: 'chat',
+      content: { id: 'msg-first-file', text: 'first', files: ['first.svg'] },
+      files: [{ filename: 'first.svg', data: Buffer.from('<svg/>') }],
+    });
+    await adapter.deliver('web:user-123', null, {
+      kind: 'chat',
+      content: { id: 'msg-second-file', text: 'second', files: ['second.svg'] },
+      files: [{ filename: 'second.svg', data: Buffer.from('<svg><g/></svg>') }],
+    });
+
+    expect(fs.readFileSync(stored('msg-first-file', 'first.svg'), 'utf8')).toBe('<svg/>');
+    expect(fs.readFileSync(stored('msg-second-file', 'second.svg'), 'utf8')).toBe('<svg><g/></svg>');
+  });
+
   it('refuses to retain a file whose name has a path separator', async () => {
     await adapter.deliver('web:user-123', null, {
       kind: 'chat',

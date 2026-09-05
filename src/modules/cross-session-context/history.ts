@@ -29,6 +29,10 @@ export interface HistoryRow {
   kind: string;
   sender: string;
   text: string;
+  /** Outbound message id when the row declares outbox files. */
+  messageId?: string;
+  /** Declared outbound outbox filenames, when present. */
+  files?: string[];
 }
 
 function normalizeBefore(value: unknown): string | undefined {
@@ -44,7 +48,7 @@ function cell(value: string): string {
   return value.replace(/\s+/g, ' ').replace(/\|/g, '/').trim().slice(0, HISTORY_TEXT_MAX_CHARS);
 }
 
-function parseText(raw: string): { text: string; sender: string | null } {
+function parseText(raw: string): { text: string; sender: string | null; files?: string[] } {
   try {
     const parsed = JSON.parse(raw) as Record<string, unknown>;
     const text =
@@ -53,7 +57,13 @@ function parseText(raw: string): { text: string; sender: string | null } {
         : typeof parsed.action === 'string'
           ? `[${parsed.action}]`
           : '';
-    return { text, sender: typeof parsed.sender === 'string' ? parsed.sender : null };
+    const files =
+      Array.isArray(parsed.files) &&
+      parsed.files.length > 0 &&
+      parsed.files.every((file): file is string => typeof file === 'string')
+        ? parsed.files
+        : undefined;
+    return { text, sender: typeof parsed.sender === 'string' ? parsed.sender : null, files };
   } catch {
     return { text: raw, sender: null };
   }
@@ -96,8 +106,15 @@ export async function sessionHistory(args: Record<string, unknown>, ctx: CallerC
       rows.push({ timestamp: r.timestamp, direction: 'in', kind: r.kind, sender: sender ?? '', text });
     }
     for (const r of history.outbound) {
-      const { text } = parseText(r.content);
-      rows.push({ timestamp: r.timestamp, direction: 'out', kind: r.kind, sender: agentName, text });
+      const { text, files } = parseText(r.content);
+      rows.push({
+        timestamp: r.timestamp,
+        direction: 'out',
+        kind: r.kind,
+        sender: agentName,
+        text,
+        ...(files && typeof r.id === 'string' ? { messageId: r.id, files } : {}),
+      });
     }
   }
 

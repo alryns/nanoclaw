@@ -79,6 +79,8 @@ export interface RecurringMessage {
 }
 
 export interface MailboxHistoryMessage {
+  /** Present for outbound rows so consumers can address its outbox files. */
+  id?: string;
   timestamp: string;
   kind: string;
   content: string;

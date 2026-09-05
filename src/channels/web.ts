@@ -7,13 +7,17 @@
  * session model supplies session unity without a web-specific key.
  */
 import { randomUUID } from 'crypto';
+import fs from 'fs';
 import http, { type IncomingMessage, type ServerResponse } from 'http';
+import path from 'path';
 
+import { isSafeAttachmentName } from '../attachment-safety.js';
 import { TWYN_POCKETBASE_URL, TWYN_WEB_HOST, TWYN_WEB_PORT } from '../config.js';
 import { getMessagingGroupAgents, getMessagingGroupByPlatform } from '../db/messaging-groups.js';
 import { findSessionByAgentGroup } from '../db/sessions.js';
 import { log } from '../log.js';
 import { HISTORY_DEFAULT_LIMIT, sessionHistory, type HistoryRow } from '../modules/cross-session-context/index.js';
+import { readOutboxFiles } from '../session-manager.js';
 import type { ChannelAdapter, ChannelDefaults, ChannelSetup, OutboundMessage } from './adapter.js';
 import { registerChannelAdapter } from './channel-registry.js';
 
@@ -85,6 +89,57 @@ function historyBefore(value: string | null): string | undefined {
   }
   const timestamp = Date.parse(value);
   return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : undefined;
+}
+
+function fileResponseType(filename: string): { contentType: string; inline: boolean; sandbox: boolean } {
+  switch (path.extname(filename).toLowerCase()) {
+    case '.html':
+      return { contentType: 'text/html; charset=utf-8', inline: true, sandbox: true };
+    case '.svg':
+      return { contentType: 'image/svg+xml', inline: true, sandbox: true };
+    case '.png':
+      return { contentType: 'image/png', inline: true, sandbox: false };
+    case '.jpg':
+    case '.jpeg':
+      return { contentType: 'image/jpeg', inline: true, sandbox: false };
+    case '.gif':
+      return { contentType: 'image/gif', inline: true, sandbox: false };
+    case '.webp':
+      return { contentType: 'image/webp', inline: true, sandbox: false };
+    case '.pdf':
+      return { contentType: 'application/pdf', inline: true, sandbox: false };
+    case '.md':
+      return { contentType: 'text/markdown; charset=utf-8', inline: true, sandbox: false };
+    case '.txt':
+      return { contentType: 'text/plain; charset=utf-8', inline: true, sandbox: false };
+    case '.csv':
+      return { contentType: 'text/csv; charset=utf-8', inline: true, sandbox: false };
+    case '.json':
+      return { contentType: 'application/json; charset=utf-8', inline: true, sandbox: false };
+    default:
+      return { contentType: 'application/octet-stream', inline: false, sandbox: false };
+  }
+}
+
+function contentDispositionFilename(filename: string): string {
+  // Control characters are exactly what must not reach a header value.
+  // eslint-disable-next-line no-control-regex
+  return filename.replace(/["\\\x00-\x1F\x7F]/g, '_');
+}
+
+function isSafeVaultPath(value: string | null): value is string {
+  return (
+    typeof value === 'string' &&
+    value.endsWith('.md') &&
+    !value.startsWith('/') &&
+    !value.includes('..') &&
+    !value.includes('\\') &&
+    /^[A-Za-z0-9._/-]+$/.test(value)
+  );
+}
+
+function isPathWithin(root: string, candidate: string): boolean {
+  return candidate.startsWith(`${root}${path.sep}`);
 }
 
 async function readJsonBody(req: IncomingMessage): Promise<unknown> {
@@ -191,7 +246,7 @@ export function createWebAdapter(options: WebAdapterOptions = {}): ChannelAdapte
     }
   }
 
-  async function resolveSession(platformId: string): Promise<{ id: string } | null> {
+  async function resolveSession(platformId: string): Promise<{ id: string; agent_group_id: string } | null> {
     const messagingGroup = await getMessagingGroupByPlatform('web', platformId);
     if (!messagingGroup) return null;
     const [wiring] = await getMessagingGroupAgents(messagingGroup.id);
@@ -315,7 +370,11 @@ export function createWebAdapter(options: WebAdapterOptions = {}): ChannelAdapte
       }
       streams.clear();
       if (server) {
-        await new Promise<void>((resolve) => server!.close(() => resolve()));
+        // Idle keep-alive sockets would otherwise outlive the listener and fail their next
+        // request on reuse (seen in the suite: per-test servers on one port, "other side closed").
+        const closing = new Promise<void>((resolve) => server!.close(() => resolve()));
+        server.closeAllConnections();
+        await closing;
         server = null;
       }
     },
@@ -337,7 +396,11 @@ export function createWebAdapter(options: WebAdapterOptions = {}): ChannelAdapte
   async function handleRequest(req: IncomingMessage, res: ServerResponse, config: ChannelSetup): Promise<void> {
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? '127.0.0.1'}`);
     if (
-      (url.pathname !== '/web/message' && url.pathname !== '/web/stream' && url.pathname !== '/web/history') ||
+      (url.pathname !== '/web/message' &&
+        url.pathname !== '/web/stream' &&
+        url.pathname !== '/web/history' &&
+        url.pathname !== '/web/file' &&
+        url.pathname !== '/web/vault') ||
       !req.method
     ) {
       res.writeHead(404).end();
@@ -351,6 +414,76 @@ export function createWebAdapter(options: WebAdapterOptions = {}): ChannelAdapte
       return;
     }
     const platformId = platformIdFor(userId);
+
+    if (url.pathname === '/web/file') {
+      if (req.method !== 'GET') {
+        res.writeHead(405).end();
+        return;
+      }
+      const messageId = url.searchParams.get('message');
+      const filename = url.searchParams.get('name');
+      if (!messageId || !filename || !isSafeAttachmentName(messageId) || !isSafeAttachmentName(filename)) {
+        sendStatus(res, 400);
+        return;
+      }
+      const session = await resolveSession(platformId);
+      if (!session) {
+        sendStatus(res, 401);
+        return;
+      }
+      const file = readOutboxFiles(session.agent_group_id, session.id, messageId, [filename])?.find(
+        (candidate) => candidate.filename === filename,
+      );
+      if (!file) {
+        res.writeHead(404).end();
+        return;
+      }
+      const type = fileResponseType(filename);
+      res.writeHead(200, {
+        'Content-Type': type.contentType,
+        'X-Content-Type-Options': 'nosniff',
+        'Cache-Control': 'private, no-store',
+        'Content-Disposition': `${type.inline ? 'inline' : 'attachment'}; filename="${contentDispositionFilename(filename)}"`,
+        ...(type.sandbox ? { 'Content-Security-Policy': 'sandbox allow-scripts' } : {}),
+      });
+      res.end(file.data);
+      return;
+    }
+
+    if (url.pathname === '/web/vault') {
+      if (req.method !== 'GET') {
+        res.writeHead(405).end();
+        return;
+      }
+      const requestedPath = url.searchParams.get('path');
+      if (!isSafeVaultPath(requestedPath)) {
+        sendStatus(res, 400);
+        return;
+      }
+      const vaultRoot = path.join(
+        process.env.TWYN_BUNDLE_ROOT ?? '/srv/twyn-oracle/bundle',
+        'current',
+        'vaults',
+        'docs',
+      );
+      try {
+        const realRoot = fs.realpathSync(vaultRoot);
+        const realFile = fs.realpathSync(path.resolve(vaultRoot, requestedPath));
+        if (!isPathWithin(realRoot, realFile) || !fs.statSync(realFile).isFile()) {
+          res.writeHead(404).end();
+          return;
+        }
+        res.writeHead(200, {
+          'Content-Type': 'text/markdown; charset=utf-8',
+          'Cache-Control': 'private, no-store',
+          'X-Content-Type-Options': 'nosniff',
+        });
+        res.end(fs.readFileSync(realFile));
+      } catch {
+        res.writeHead(404).end();
+      }
+      return;
+    }
 
     if (url.pathname === '/web/stream' && req.method === 'GET') {
       res.writeHead(200, {

@@ -1,4 +1,7 @@
 /** Web channel adapter tests: PocketBase auth, transcript streaming, and SSE delivery. */
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { InboundEvent } from './adapter.js';
@@ -8,6 +11,7 @@ const transcript = vi.hoisted(() => ({
   findSessionByAgentGroup: vi.fn(),
   getMessagingGroupAgents: vi.fn(),
   getMessagingGroupByPlatform: vi.fn(),
+  readOutboxFiles: vi.fn(),
   sessionHistory: vi.fn(),
 }));
 
@@ -24,6 +28,8 @@ vi.mock('../db/messaging-groups.js', () => ({
 }));
 
 vi.mock('../db/sessions.js', () => ({ findSessionByAgentGroup: transcript.findSessionByAgentGroup }));
+
+vi.mock('../session-manager.js', () => ({ readOutboxFiles: transcript.readOutboxFiles }));
 
 vi.mock('../modules/cross-session-context/index.js', () => ({
   HISTORY_DEFAULT_LIMIT: 50,
@@ -58,6 +64,14 @@ function streamUrl(): string {
 
 function historyUrl(query = ''): string {
   return `http://127.0.0.1:18091/web/history${query}`;
+}
+
+function fileUrl(query = ''): string {
+  return `http://127.0.0.1:18091/web/file${query}`;
+}
+
+function vaultUrl(query = ''): string {
+  return `http://127.0.0.1:18091/web/vault${query}`;
 }
 
 function row(
@@ -121,10 +135,11 @@ beforeEach(async () => {
   transcript.getMessagingGroupByPlatform.mockReset();
   transcript.getMessagingGroupAgents.mockReset();
   transcript.findSessionByAgentGroup.mockReset();
+  transcript.readOutboxFiles.mockReset();
   transcript.sessionHistory.mockReset();
   transcript.getMessagingGroupByPlatform.mockResolvedValue({ id: 'web-messaging-group' });
   transcript.getMessagingGroupAgents.mockResolvedValue([{ agent_group_id: 'agent-group' }]);
-  transcript.findSessionByAgentGroup.mockResolvedValue({ id: 'shared-session' });
+  transcript.findSessionByAgentGroup.mockResolvedValue({ id: 'shared-session', agent_group_id: 'agent-group' });
   transcript.sessionHistory.mockImplementation(async () => historyRows);
   vi.stubGlobal('fetch', fetchMock);
   adapter = createWebAdapter({ pollIntervalMs: 20, tokenCacheMax: 2 });
@@ -145,6 +160,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await adapter.teardown();
+  vi.unstubAllEnvs();
 });
 
 afterAll(() => {
@@ -165,6 +181,136 @@ describe('web channel', () => {
     });
 
     expect(response.status).toBe(405);
+  });
+
+  it('keeps file metadata in the history response', async () => {
+    historyRows = [
+      { ...row('download ready', '2026-09-04T10:00:00.000Z'), messageId: 'out-files', files: ['report.html'] },
+    ];
+
+    const response = await nativeFetch(historyUrl(), { headers: { Authorization: 'Bearer history-files-token' } });
+
+    await expect(response.json()).resolves.toEqual({ rows: historyRows, exhausted: true });
+  });
+
+  it('returns 401 when a file has no token', async () => {
+    const response = await nativeFetch(fileUrl('?message=out-files&name=report.html'));
+
+    expect(response.status).toBe(401);
+  });
+
+  it('rejects an unsafe file name', async () => {
+    const response = await nativeFetch(fileUrl('?message=out-files&name=..%2Fsecret.html'), {
+      headers: { Authorization: 'Bearer file-bad-name-token' },
+    });
+
+    expect(response.status).toBe(400);
+  });
+
+  it.each([fileUrl('?message=out-files&name=report.html'), vaultUrl('?path=guide.md')])(
+    'rejects non-GET requests to %s',
+    async (url) => {
+      const response = await nativeFetch(url, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer route-method-token' },
+      });
+
+      expect(response.status).toBe(405);
+    },
+  );
+
+  it('returns 404 when an outbox file is absent', async () => {
+    const response = await nativeFetch(fileUrl('?message=out-files&name=report.html'), {
+      headers: { Authorization: 'Bearer file-missing-token' },
+    });
+
+    expect(response.status).toBe(404);
+    expect(transcript.readOutboxFiles).toHaveBeenCalledWith('agent-group', 'shared-session', 'out-files', [
+      'report.html',
+    ]);
+  });
+
+  it('serves an html outbox file with the restrictive headers', async () => {
+    transcript.readOutboxFiles.mockReturnValue([{ filename: 'report.html', data: Buffer.from('<h1>Report</h1>') }]);
+
+    const response = await nativeFetch(fileUrl('?message=out-files&name=report.html'), {
+      headers: { Authorization: 'Bearer file-html-token' },
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('content-type')).toBe('text/html; charset=utf-8');
+    expect(response.headers.get('content-security-policy')).toBe('sandbox allow-scripts');
+    expect(response.headers.get('x-content-type-options')).toBe('nosniff');
+    expect(response.headers.get('cache-control')).toBe('private, no-store');
+    expect(response.headers.get('content-disposition')).toBe('inline; filename="report.html"');
+    await expect(response.text()).resolves.toBe('<h1>Report</h1>');
+  });
+
+  it('returns 401 when a vault page has no token', async () => {
+    const response = await nativeFetch(vaultUrl('?path=guide.md'));
+
+    expect(response.status).toBe(401);
+  });
+
+  it('rejects vault traversal and non-markdown paths', async () => {
+    for (const requestPath of ['..%2Fguide.md', 'guide.txt']) {
+      // Connection: close, so the second request's socket is not pooled past this test's
+      // server (the next test starts a fresh server on the same port).
+      const response = await nativeFetch(vaultUrl(`?path=${requestPath}`), {
+        headers: { Authorization: 'Bearer vault-invalid-token', Connection: 'close' },
+      });
+      expect(response.status).toBe(400);
+    }
+  });
+
+  // One request per test: the fixture server is recreated per test on a fixed port and a second
+  // sequential fetch can reuse a pooled socket from the previous server.
+  function vaultFixtureWithOutsideLink(): string {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoclaw-web-vault-'));
+    const docsRoot = path.join(root, 'current', 'vaults', 'docs');
+    const outside = path.join(root, 'outside.md');
+    fs.mkdirSync(docsRoot, { recursive: true });
+    fs.writeFileSync(outside, 'outside');
+    fs.symlinkSync(outside, path.join(docsRoot, 'outside.md'));
+    vi.stubEnv('TWYN_BUNDLE_ROOT', root);
+    return root;
+  }
+
+  it('returns 404 for a missing vault page', async () => {
+    const root = vaultFixtureWithOutsideLink();
+    const response = await nativeFetch(vaultUrl('?path=missing.md'), {
+      headers: { Authorization: 'Bearer vault-missing-token' },
+    });
+    expect(response.status).toBe(404);
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it('returns 404 for a vault page whose symlink leaves the docs root', async () => {
+    const root = vaultFixtureWithOutsideLink();
+    const response = await nativeFetch(vaultUrl('?path=outside.md'), {
+      headers: { Authorization: 'Bearer vault-missing-token' },
+    });
+    expect(response.status).toBe(404);
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it('serves a markdown vault page within the configured docs root', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoclaw-web-vault-'));
+    const docsRoot = path.join(root, 'current', 'vaults', 'docs', 'nested');
+    fs.mkdirSync(docsRoot, { recursive: true });
+    fs.writeFileSync(path.join(docsRoot, 'guide.md'), '# Guide\n');
+    vi.stubEnv('TWYN_BUNDLE_ROOT', root);
+
+    const response = await nativeFetch(vaultUrl('?path=nested/guide.md'), {
+      headers: { Authorization: 'Bearer vault-page-token' },
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('content-type')).toBe('text/markdown; charset=utf-8');
+    expect(response.headers.get('cache-control')).toBe('private, no-store');
+    expect(response.headers.get('x-content-type-options')).toBe('nosniff');
+    await expect(response.text()).resolves.toBe('# Guide\n');
+    fs.rmSync(root, { recursive: true, force: true });
   });
 
   it('returns the newest history page oldest-first and reports more rows', async () => {
@@ -384,13 +530,19 @@ describe('web channel', () => {
   it('sends fresh transcript rows as marked backfill', async () => {
     historyRows = [
       row('Slack question', '2026-09-04T10:00:00.000Z', 'in'),
-      row('Slack answer', '2026-09-04T10:00:01.000Z'),
+      { ...row('Slack answer', '2026-09-04T10:00:01.000Z'), messageId: 'out-files', files: ['report.html'] },
     ];
 
     const stream = await openStream();
 
     await expect(stream.next()).resolves.toMatchObject({ text: 'Slack question', direction: 'in', backfill: true });
-    await expect(stream.next()).resolves.toMatchObject({ text: 'Slack answer', direction: 'out', backfill: true });
+    await expect(stream.next()).resolves.toMatchObject({
+      text: 'Slack answer',
+      direction: 'out',
+      messageId: 'out-files',
+      files: ['report.html'],
+      backfill: true,
+    });
     await stream.close();
   });
 

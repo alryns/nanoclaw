@@ -51,12 +51,12 @@ This procedure assumes the branch is reasonably current. A registry branch left 
 
 Files with known mechanical resolutions:
 
-| File | Resolution |
-|------|------------|
-| `package.json` | Take main's version + keep branch-specific deps |
-| `pnpm-lock.yaml` | `git checkout main -- pnpm-lock.yaml && pnpm install` |
-| `.env.example` | Combine: main's entries + branch-specific entries |
-| `repo-tokens/badge.svg` | Take main's version (auto-generated) |
+| File                    | Resolution                                            |
+| ----------------------- | ----------------------------------------------------- |
+| `package.json`          | Take main's version + keep branch-specific deps       |
+| `pnpm-lock.yaml`        | `git checkout main -- pnpm-lock.yaml && pnpm install` |
+| `.env.example`          | Combine: main's entries + branch-specific entries     |
+| `repo-tokens/badge.svg` | Take main's version (auto-generated)                  |
 
 Source code changes (e.g. `src/types.ts`, `src/index.ts`) usually auto-merge cleanly, but can conflict if both sides modify the same lines. **Always build and test after every forward merge** — auto-merged code can be silently wrong (e.g. referencing a renamed function or using a removed parameter) even when git reports no conflicts.
 
@@ -88,3 +88,4 @@ Registry branches add their own deps on top of upstream's. Skill `nc:dep` direct
    (ISO timestamp or Date) so the web adapter can page backwards; default behaviour unchanged.
    Consumed by `GET /web/history` in `src/channels/web.ts`. On rebase, re-apply as an optional
    argument; a cutoff reads the full transcript (the mailbox API is newest-first only).
+4. Outbound history rows carry the message id so the web adapter can serve outbox files.

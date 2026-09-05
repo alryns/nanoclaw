@@ -101,6 +101,28 @@ describe('sessionHistory', () => {
     expect(rows[2].kind).toBe('chat');
     expect(rows[2].sender).toBe('Pixel'); // agent group name as outbound sender
     expect(rows[2].text).toBe('agent reply');
+    expect(rows[2]).not.toHaveProperty('messageId');
+    expect(rows[2]).not.toHaveProperty('files');
+  });
+
+  it('includes the outbound message id and declared files when present', async () => {
+    await writeOutboundDirect(AG, SESS, {
+      id: 'out-files',
+      kind: 'chat',
+      platformId: 'D1',
+      channelType: 'slack',
+      threadId: null,
+      content: JSON.stringify({ text: 'download ready', files: ['report.html', 'data.csv'] }),
+    });
+
+    await expect(sessionHistory({ id: SESS }, HOST)).resolves.toEqual([
+      expect.objectContaining({
+        direction: 'out',
+        text: 'download ready',
+        messageId: 'out-files',
+        files: ['report.html', 'data.csv'],
+      }),
+    ]);
   });
 
   it('formatHistoryLines renders pipe lines with localized stamps and capped cells', async () => {

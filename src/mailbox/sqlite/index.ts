@@ -402,7 +402,9 @@ export function wrapSqliteOutbound(
     getOutboundHistory: (limit) =>
       (
         readable()
-          .prepare('SELECT timestamp, kind, content FROM messages_out ORDER BY seq DESC LIMIT ?')
+          .prepare(
+            'SELECT CAST(id AS TEXT) AS id, timestamp, kind, content FROM messages_out ORDER BY seq DESC LIMIT ?',
+          )
           .all(limit) as MailboxHistoryMessage[]
       ).map((row) => ({ ...row, timestamp: sqliteTimestamp(row.timestamp) })),
     getTopLevelOutbound: (limit) =>

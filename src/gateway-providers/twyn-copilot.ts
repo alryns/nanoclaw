@@ -14,7 +14,7 @@
 import fs from 'fs';
 import path from 'path';
 
-import { AGENT_NO_PROXY, GROUPS_DIR } from '../config.js';
+import { AGENT_NO_PROXY, DATA_DIR, GROUPS_DIR } from '../config.js';
 import { getAgentGroup } from '../db/agent-groups.js';
 import { looksLikeCredential } from '../drivers/types.js';
 import { registerGatewayProvider, type GatewayProviderInput } from './gateway-provider-registry.js';
@@ -23,7 +23,15 @@ import { admitSpawn } from './twyn-lifecycle.js';
 const ANTHROPIC_BASE_URL = process.env.ANTHROPIC_BASE_URL || 'http://copilot-gateway:4141';
 
 export const TWYN_ENV_FILE = 'twyn-env.json';
-export const TWYN_GATEWAY_FILE = 'twyn-gateway.json';
+/**
+ * Per-group gateway endpoint, written by the provisioner under data/twyn-seats, NOT in the group
+ * folder: the agent can write and delete files there, and deleting the endpoint file would drop
+ * it back onto the platform gateway (review finding 2026-09-05). data/ is never an agent mount.
+ */
+export const TWYN_SEATS_DIR = path.join(DATA_DIR, 'twyn-seats');
+export function twynGatewayFile(folder: string): string {
+  return path.join(TWYN_SEATS_DIR, `${folder}.gateway.json`);
+}
 const ENV_NAME_RE = /^[A-Z][A-Z0-9_]*$/;
 /** Keys the file may never override: they define the model plane, not the group. */
 const RESERVED = new Set(['ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN']);
@@ -69,7 +77,7 @@ export async function readGroupEnv(agentGroupId: string): Promise<Record<string,
 export async function readGroupGateway(agentGroupId: string): Promise<{ baseUrl: string } | null> {
   const group = await getAgentGroup(agentGroupId);
   if (!group) return null;
-  const file = path.join(GROUPS_DIR, group.folder, TWYN_GATEWAY_FILE);
+  const file = twynGatewayFile(group.folder);
   if (!fs.existsSync(file)) return null;
 
   let parsed: unknown;

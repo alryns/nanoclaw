@@ -4,13 +4,16 @@ import path from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // vi.mock is hoisted above imports; vi.hoisted runs first so the factory can see the dir.
-const { groupsDir } = vi.hoisted(() => {
-  return { groupsDir: `/tmp/twyn-groups-${process.pid}-${Date.now()}` };
+const { groupsDir, dataDir } = vi.hoisted(() => {
+  return {
+    groupsDir: `/tmp/twyn-groups-${process.pid}-${Date.now()}`,
+    dataDir: `/tmp/twyn-data-${process.pid}-${Date.now()}`,
+  };
 });
 
 vi.mock('../config.js', async () => {
   const actual = await vi.importActual<typeof import('../config.js')>('../config.js');
-  return { ...actual, GROUPS_DIR: groupsDir };
+  return { ...actual, GROUPS_DIR: groupsDir, DATA_DIR: dataDir };
 });
 vi.mock('../db/agent-groups.js', () => ({
   getAgentGroup: vi.fn(async (id: string) => (id === 'group-1' ? { id, name: 'Spike', folder: 'spike' } : undefined)),
@@ -19,7 +22,7 @@ vi.mock('../db/agent-groups.js', () => ({
 import { validateSpec, type SessionSpec } from '../drivers/types.js';
 import { getGatewayProvider, resetGatewayProvider } from './index.js';
 import { AGENT_NO_PROXY } from '../config.js';
-import { TWYN_ENV_FILE, TWYN_GATEWAY_FILE } from './twyn-copilot.js';
+import { TWYN_ENV_FILE } from './twyn-copilot.js';
 import { _resetTwynLifecycleForTesting } from './twyn-lifecycle.js';
 
 const input = {
@@ -37,12 +40,13 @@ const input = {
   },
 };
 const envFile = path.join(groupsDir, 'spike', TWYN_ENV_FILE);
-const gatewayFile = path.join(groupsDir, 'spike', TWYN_GATEWAY_FILE);
+const gatewayFile = path.join(dataDir, 'twyn-seats', 'spike.gateway.json');
 
 beforeEach(() => {
   _resetTwynLifecycleForTesting();
   vi.stubEnv('NANOCLAW_GATEWAY_PROVIDER', 'twyn-copilot');
   fs.mkdirSync(path.dirname(envFile), { recursive: true });
+  fs.mkdirSync(path.dirname(gatewayFile), { recursive: true });
   fs.rmSync(envFile, { force: true });
   fs.rmSync(gatewayFile, { force: true });
 });
@@ -122,17 +126,13 @@ describe('twyn-copilot gateway provider', () => {
   ])('refuses a gateway file with %s', async (_description, value) => {
     fs.writeFileSync(gatewayFile, JSON.stringify(value));
 
-    await expect(getGatewayProvider().contribute(input)).rejects.toThrow(
-      new RegExp(`${TWYN_GATEWAY_FILE.replace('.', '\\.')}: baseUrl must be`),
-    );
+    await expect(getGatewayProvider().contribute(input)).rejects.toThrow(/spike\.gateway\.json: baseUrl must be/);
   });
 
   it('refuses malformed gateway JSON', async () => {
     fs.writeFileSync(gatewayFile, '{ not json');
 
-    await expect(getGatewayProvider().contribute(input)).rejects.toThrow(
-      new RegExp(`${TWYN_GATEWAY_FILE.replace('.', '\\.')}: must be valid JSON`),
-    );
+    await expect(getGatewayProvider().contribute(input)).rejects.toThrow(/spike\.gateway\.json: must be valid JSON/);
   });
 
   it('fails closed on malformed JSON, non-string values, bad names and reserved keys', async () => {

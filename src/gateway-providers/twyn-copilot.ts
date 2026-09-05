@@ -18,6 +18,7 @@ import { GROUPS_DIR } from '../config.js';
 import { getAgentGroup } from '../db/agent-groups.js';
 import { looksLikeCredential } from '../drivers/types.js';
 import { registerGatewayProvider, type GatewayProviderInput } from './gateway-provider-registry.js';
+import { admitSpawn } from './twyn-lifecycle.js';
 
 const ANTHROPIC_BASE_URL = process.env.ANTHROPIC_BASE_URL || 'http://copilot-gateway:4141';
 
@@ -40,7 +41,7 @@ export async function readGroupEnv(agentGroupId: string): Promise<Record<string,
   try {
     parsed = JSON.parse(fs.readFileSync(file, 'utf-8'));
   } catch (err) {
-    throw new Error(`${file}: not valid JSON (${err instanceof Error ? err.message : String(err)})`);
+    throw new Error(`${file}: not valid JSON (${err instanceof Error ? err.message : String(err)})`, { cause: err });
   }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
     throw new Error(`${file}: expected a JSON object of string values`);
@@ -62,9 +63,11 @@ export async function readGroupEnv(agentGroupId: string): Promise<Record<string,
 registerGatewayProvider('twyn-copilot', () => ({
   kind: 'twyn-copilot',
   async contribute(input: GatewayProviderInput) {
+    const groupEnv = await readGroupEnv(input.key.agentGroupId);
+    await admitSpawn(input.key.sessionId);
     return {
       env: {
-        ...(await readGroupEnv(input.key.agentGroupId)),
+        ...groupEnv,
         ANTHROPIC_BASE_URL,
         ANTHROPIC_AUTH_TOKEN: 'sk-dummy',
       },

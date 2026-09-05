@@ -1,15 +1,11 @@
 import fs from 'fs';
-import os from 'os';
 import path from 'path';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // vi.mock is hoisted above imports; vi.hoisted runs first so the factory can see the dir.
 const { groupsDir } = vi.hoisted(() => {
-  const fs = require('fs') as typeof import('fs');
-  const os = require('os') as typeof import('os');
-  const path = require('path') as typeof import('path');
-  return { groupsDir: fs.mkdtempSync(path.join(os.tmpdir(), 'twyn-groups-')) };
+  return { groupsDir: `/tmp/twyn-groups-${process.pid}-${Date.now()}` };
 });
 
 vi.mock('../config.js', async () => {
@@ -23,6 +19,7 @@ vi.mock('../db/agent-groups.js', () => ({
 import { validateSpec, type SessionSpec } from '../drivers/types.js';
 import { getGatewayProvider, resetGatewayProvider } from './index.js';
 import { TWYN_ENV_FILE } from './twyn-copilot.js';
+import { _resetTwynLifecycleForTesting } from './twyn-lifecycle.js';
 
 const input = {
   key: { installSlug: 'test', agentGroupId: 'group-1', sessionId: 'session-1' },
@@ -41,11 +38,13 @@ const input = {
 const envFile = path.join(groupsDir, 'spike', TWYN_ENV_FILE);
 
 beforeEach(() => {
+  _resetTwynLifecycleForTesting();
   vi.stubEnv('NANOCLAW_GATEWAY_PROVIDER', 'twyn-copilot');
   fs.mkdirSync(path.dirname(envFile), { recursive: true });
   fs.rmSync(envFile, { force: true });
 });
 afterEach(() => {
+  _resetTwynLifecycleForTesting();
   resetGatewayProvider();
   vi.unstubAllEnvs();
 });
@@ -92,7 +91,10 @@ describe('twyn-copilot gateway provider', () => {
   it('contributes only the base env for a group without the file or without a DB row', async () => {
     const { env } = await getGatewayProvider().contribute(input);
     expect(Object.keys(env ?? {}).sort()).toEqual(['ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL']);
-    const other = await getGatewayProvider().contribute({ ...input, key: { ...input.key, agentGroupId: 'missing' } });
+    const other = await getGatewayProvider().contribute({
+      ...input,
+      key: { ...input.key, agentGroupId: 'missing', sessionId: 'session-2' },
+    });
     expect(Object.keys(other.env ?? {}).length).toBe(2);
   });
 
@@ -100,11 +102,17 @@ describe('twyn-copilot gateway provider', () => {
     fs.writeFileSync(envFile, '{ not json');
     await expect(getGatewayProvider().contribute(input)).rejects.toThrow(/not valid JSON/);
     fs.writeFileSync(envFile, JSON.stringify({ TWYNBRAIN_READONLY: 1 }));
-    await expect(getGatewayProvider().contribute(input)).rejects.toThrow(/must be a string/);
+    await expect(
+      getGatewayProvider().contribute({ ...input, key: { ...input.key, sessionId: 'session-2' } }),
+    ).rejects.toThrow(/must be a string/);
     fs.writeFileSync(envFile, JSON.stringify({ 'lower-case': 'x' }));
-    await expect(getGatewayProvider().contribute(input)).rejects.toThrow(/not an environment variable name/);
+    await expect(
+      getGatewayProvider().contribute({ ...input, key: { ...input.key, sessionId: 'session-3' } }),
+    ).rejects.toThrow(/not an environment variable name/);
     fs.writeFileSync(envFile, JSON.stringify({ ANTHROPIC_BASE_URL: 'http://evil' }));
-    await expect(getGatewayProvider().contribute(input)).rejects.toThrow(/reserved/);
+    await expect(
+      getGatewayProvider().contribute({ ...input, key: { ...input.key, sessionId: 'session-4' } }),
+    ).rejects.toThrow(/reserved/);
   });
 
   it('refuses credential-shaped values so secrets never ride the env', async () => {

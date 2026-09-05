@@ -56,6 +56,10 @@ function streamUrl(): string {
   return 'http://127.0.0.1:18091/web/stream';
 }
 
+function historyUrl(query = ''): string {
+  return `http://127.0.0.1:18091/web/history${query}`;
+}
+
 function row(
   text: string,
   timestamp: string,
@@ -148,6 +152,88 @@ afterAll(() => {
 });
 
 describe('web channel', () => {
+  it('returns 401 when history has no token', async () => {
+    const response = await nativeFetch(historyUrl());
+
+    expect(response.status).toBe(401);
+  });
+
+  it('rejects non-GET history requests', async () => {
+    const response = await nativeFetch(historyUrl(), {
+      method: 'POST',
+      headers: { Authorization: 'Bearer history-token' },
+    });
+
+    expect(response.status).toBe(405);
+  });
+
+  it('returns the newest history page oldest-first and reports more rows', async () => {
+    historyRows = [
+      row('one', '2026-09-04T10:00:00.000Z'),
+      row('two', '2026-09-04T10:01:00.000Z'),
+      row('three', '2026-09-04T10:02:00.000Z'),
+    ];
+    transcript.sessionHistory.mockImplementation(async (args) => historyRows.slice(-Number(args.limit)));
+
+    const response = await nativeFetch(historyUrl('?limit=2'), { headers: { Authorization: 'Bearer history-token' } });
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    await expect(response.json()).resolves.toEqual({ rows: historyRows.slice(1), exhausted: false });
+  });
+
+  it('reports exhausted at the start of history', async () => {
+    historyRows = [row('first', '2026-09-04T10:00:00.000Z')];
+
+    const response = await nativeFetch(historyUrl('?before=2026-09-04T10:00:00.000Z'), {
+      headers: { Authorization: 'Bearer history-token' },
+    });
+
+    await expect(response.json()).resolves.toEqual({ rows: historyRows, exhausted: true });
+  });
+
+  it('uses before to exclude newer rows', async () => {
+    historyRows = [
+      row('one', '2026-09-04T10:00:00.000Z'),
+      row('two', '2026-09-04T10:01:00.000Z'),
+      row('three', '2026-09-04T10:02:00.000Z'),
+    ];
+    transcript.sessionHistory.mockImplementation(async (args) =>
+      historyRows.filter((entry) => entry.timestamp <= String(args.before)).slice(-Number(args.limit)),
+    );
+
+    const response = await nativeFetch(historyUrl('?before=2026-09-04T10:01:00.000Z'), {
+      headers: { Authorization: 'Bearer history-token' },
+    });
+
+    await expect(response.json()).resolves.toEqual({ rows: historyRows.slice(0, 2), exhausted: true });
+  });
+
+  it('caps history limit at 200', async () => {
+    const response = await nativeFetch(historyUrl('?limit=999'), {
+      headers: { Authorization: 'Bearer history-token' },
+    });
+
+    expect(response.status).toBe(200);
+    expect(transcript.sessionHistory).toHaveBeenLastCalledWith(
+      { id: 'shared-session', limit: 201 },
+      { caller: 'host' },
+    );
+  });
+
+  it('uses the newest rows when before is missing', async () => {
+    historyRows = [
+      row('one', '2026-09-04T10:00:00.000Z'),
+      row('two', '2026-09-04T10:01:00.000Z'),
+      row('three', '2026-09-04T10:02:00.000Z'),
+    ];
+    transcript.sessionHistory.mockImplementation(async (args) => historyRows.slice(-Number(args.limit)));
+
+    const response = await nativeFetch(historyUrl('?limit=2'), { headers: { Authorization: 'Bearer history-token' } });
+
+    await expect(response.json()).resolves.toEqual({ rows: historyRows.slice(1), exhausted: false });
+  });
+
   it('returns 401 when a message has no token', async () => {
     const response = await nativeFetch(messageUrl(), {
       method: 'POST',

@@ -31,6 +31,13 @@ export interface HistoryRow {
   text: string;
 }
 
+function normalizeBefore(value: unknown): string | undefined {
+  if (value instanceof Date) return Number.isFinite(value.getTime()) ? value.toISOString() : undefined;
+  if (typeof value !== 'string') return undefined;
+  const milliseconds = Date.parse(value);
+  return Number.isFinite(milliseconds) ? new Date(milliseconds).toISOString() : undefined;
+}
+
 function cell(value: string): string {
   // Keep the one-line-per-message format intact: newlines and pipes in
   // message text would shred downstream line/field parsing.
@@ -54,7 +61,8 @@ function parseText(raw: string): { text: string; sender: string | null } {
 
 /**
  * Handler for the sessions `history` custom operation. Returns the merged
- * transcript as structured rows (newest `limit`, chronological order) —
+ * transcript as structured rows (newest `limit`, chronological order, and
+ * optionally no later than `before`) —
  * the frame `data`, so `--json` callers get real rows with ISO timestamps.
  * Human rendering (pipe lines, localized stamps, capped cells) lives in
  * `formatHistoryLines`, wired as the operation's `formatHuman`.
@@ -64,6 +72,7 @@ export async function sessionHistory(args: Record<string, unknown>, ctx: CallerC
   if (!sessionId) throw new Error('session id is required');
   const limitRaw = Number(args.limit ?? HISTORY_DEFAULT_LIMIT);
   const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.floor(limitRaw) : HISTORY_DEFAULT_LIMIT;
+  const before = normalizeBefore(args.before);
 
   const session = await getSession(sessionId);
   // Self-scope (see header): cross-group agents get "not found", never "forbidden".
@@ -75,8 +84,10 @@ export async function sessionHistory(args: Record<string, unknown>, ctx: CallerC
   const rows: HistoryRow[] = [];
 
   const history = await withExistingMailboxSession(session.agent_group_id, session.id, (mailbox) => ({
-    inbound: mailbox.getInboundHistory(limit),
-    outbound: mailbox.getOutboundHistory(limit),
+    // The mailbox history API is newest-first only. A cutoff must therefore
+    // read the complete transcript before it can select the preceding page.
+    inbound: mailbox.getInboundHistory(before ? Number.MAX_SAFE_INTEGER : limit),
+    outbound: mailbox.getOutboundHistory(before ? Number.MAX_SAFE_INTEGER : limit),
   }));
 
   if (history) {
@@ -91,7 +102,8 @@ export async function sessionHistory(args: Record<string, unknown>, ctx: CallerC
   }
 
   rows.sort((a, b) => (a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0));
-  return rows.slice(-limit);
+  const eligible = before ? rows.filter((row) => row.timestamp <= before) : rows;
+  return eligible.slice(-limit);
 }
 
 /**

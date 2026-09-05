@@ -72,6 +72,19 @@ function extractBearer(req: IncomingMessage, url: URL): string | null {
   return url.searchParams.get('token');
 }
 
+function historyLimit(value: string | null): number {
+  if (!value || !/^[1-9]\d*$/.test(value)) return HISTORY_DEFAULT_LIMIT;
+  return Math.min(Number(value), 200);
+}
+
+function historyBefore(value: string | null): string | undefined {
+  if (!value || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/.test(value)) {
+    return undefined;
+  }
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : undefined;
+}
+
 async function readJsonBody(req: IncomingMessage): Promise<unknown> {
   let body = '';
   for await (const chunk of req) {
@@ -321,7 +334,10 @@ export function createWebAdapter(options: WebAdapterOptions = {}): ChannelAdapte
 
   async function handleRequest(req: IncomingMessage, res: ServerResponse, config: ChannelSetup): Promise<void> {
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? '127.0.0.1'}`);
-    if ((url.pathname !== '/web/message' && url.pathname !== '/web/stream') || !req.method) {
+    if (
+      (url.pathname !== '/web/message' && url.pathname !== '/web/stream' && url.pathname !== '/web/history') ||
+      !req.method
+    ) {
       res.writeHead(404).end();
       return;
     }
@@ -342,6 +358,24 @@ export function createWebAdapter(options: WebAdapterOptions = {}): ChannelAdapte
       });
       res.flushHeaders();
       addStream(platformId, res);
+      return;
+    }
+
+    if (url.pathname === '/web/history' && req.method === 'GET') {
+      const session = await resolveSession(platformId);
+      if (!session) {
+        sendStatus(res, 401);
+        return;
+      }
+      const limit = historyLimit(url.searchParams.get('limit'));
+      const before = historyBefore(url.searchParams.get('before'));
+      const rows = await sessionHistory(
+        { id: session.id, limit: limit + 1, ...(before ? { before } : {}) },
+        { caller: 'host' },
+      );
+      const exhausted = rows.length <= limit;
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+      res.end(JSON.stringify({ rows: rows.slice(-limit), exhausted }));
       return;
     }
 

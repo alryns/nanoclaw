@@ -84,3 +84,7 @@ Registry branches add their own deps on top of upstream's. Skill `nc:dep` direct
    `/etc/claude-code/managed-settings.json` (two lines before the ncl wrapper). Claude Code's
    managed layer: deny rules the agent cannot edit. On rebase, keep the COPY next to the ncl
    wrapper block; the JSON file itself is a pure addition.
+3. `modules/cross-session-context/history.ts`: `sessionHistory` accepts an optional `before`
+   (ISO timestamp or Date) so the web adapter can page backwards; default behaviour unchanged.
+   Consumed by `GET /web/history` in `src/channels/web.ts`. On rebase, re-apply as an optional
+   argument; a cutoff reads the full transcript (the mailbox API is newest-first only).

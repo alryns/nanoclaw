@@ -122,6 +122,16 @@ describe('sessionHistory', () => {
     expect(rows[1].text).toBe('msg 4');
   });
 
+  it('applies before before keeping the newest eligible rows', async () => {
+    for (let i = 0; i < 5; i++) {
+      await writeInbound(`in-${i}`, `2026-08-01T10:0${i}:00.000Z`, `msg ${i}`);
+    }
+
+    const rows = await sessionHistory({ id: SESS, limit: 2, before: '2026-08-01T10:02:00.000Z' }, HOST);
+
+    expect(rows.map((entry) => entry.text)).toEqual(['msg 1', 'msg 2']);
+  });
+
   it('sanitizes newlines and pipes in the human rendering only — rows keep the raw text', async () => {
     await writeInbound('in-1', '2026-08-01T10:00:00.000Z', 'line one\nline two | with pipe');
     const rows = await sessionHistory({ id: SESS }, HOST);

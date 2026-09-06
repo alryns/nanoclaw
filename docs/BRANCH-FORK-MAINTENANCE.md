@@ -84,6 +84,9 @@ Registry branches add their own deps on top of upstream's. Skill `nc:dep` direct
    `/etc/claude-code/managed-settings.json` (two lines before the ncl wrapper). Claude Code's
    managed layer: deny rules the agent cannot edit. On rebase, keep the COPY next to the ncl
    wrapper block; the JSON file itself is a pure addition.
+   The same file carries a `PreToolUse` hook on `mcp__nanoclaw__send_file` that runs the
+   platform diagram checks (`platform-send-gate.py` on the platform-skills mount) and blocks a
+   failing .svg/.html with the findings; needs python3 in the image (knob 6).
 3. `modules/cross-session-context/history.ts`: `sessionHistory` accepts an optional `before`
    (ISO timestamp or Date) so the web adapter can page backwards; default behaviour unchanged.
    Consumed by `GET /web/history` in `src/channels/web.ts`. On rebase, re-apply as an optional

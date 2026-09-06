@@ -1,5 +1,5 @@
 {
-  "$comment": "TwynOracle managed settings for cohort agents. Root-owned in the image, so the agent cannot edit it; Claude Code enforces deny rules in every permission mode. Belt and braces over the container's physical limits (one egress host, no registries, no gh). Cohort agents answer, snapshot, chart and document; they do not ship code.",
+  "$comment": "TwynOracle managed settings for cohort agents. Root-owned in the image, so the agent cannot edit it; Claude Code enforces deny rules in every permission mode. Belt and braces over the container's physical limits (one egress host, no registries, no gh). Cohort agents answer, snapshot, chart and document; they do not ship code. The send_file hook runs the platform diagram checks on any .svg/.html the agent sends and blocks a failing file with the findings; session memory cannot skip a hook.",
   "permissions": {
     "deny": [
       "Bash(git push:*)",
@@ -24,6 +24,20 @@
       "Bash(apt-get:*)",
       "Bash(curl:*)",
       "Bash(wget:*)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "mcp__nanoclaw__send_file",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /workspace/extra/platform-skills/.claude/skills/diagram-design/scripts/platform-send-gate.py",
+            "timeout": 60
+          }
+        ]
+      }
     ]
   }
 }

@@ -89,3 +89,6 @@ Registry branches add their own deps on top of upstream's. Skill `nc:dep` direct
    Consumed by `GET /web/history` in `src/channels/web.ts`. On rebase, re-apply as an optional
    argument; a cutoff reads the full transcript (the mailbox API is newest-first only).
 4. Outbound history rows carry the message id so the web adapter can serve outbox files.
+5. `container/Dockerfile` installs `python3` (stdlib only, no pip) so the vendored diagram-design
+   verify scripts under the platform-skills mount can run inside the agent container. On
+   rebase, re-add the one apt line.

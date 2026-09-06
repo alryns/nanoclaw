@@ -12,6 +12,7 @@ const transcript = vi.hoisted(() => ({
   getMessagingGroupAgents: vi.fn(),
   getMessagingGroupByPlatform: vi.fn(),
   readOutboxFiles: vi.fn(),
+  isContainerRunning: vi.fn(() => false),
   sessionHistory: vi.fn(),
 }));
 const WEB_FILES_TEST_DATA_DIR = vi.hoisted(() => '/tmp/nanoclaw-web-files-test');
@@ -29,6 +30,7 @@ vi.mock('../db/messaging-groups.js', () => ({
 }));
 
 vi.mock('../db/sessions.js', () => ({ findSessionByAgentGroup: transcript.findSessionByAgentGroup }));
+vi.mock('../container-runner.js', () => ({ isContainerRunning: transcript.isContainerRunning }));
 
 vi.mock('../session-manager.js', () => ({ readOutboxFiles: transcript.readOutboxFiles }));
 
@@ -331,6 +333,30 @@ describe('web channel', () => {
     expect(first.event).toBe('working');
     expect(first.data).toEqual({ at: expect.any(String), status: null });
     expect(second).toEqual({ event: 'working', data: { at: expect.any(String), status: 'Reading the vault' } });
+  });
+
+  it('emits working events on its own while a container runs for the session', async () => {
+    transcript.isContainerRunning.mockReturnValue(true);
+    const stream = await openStream();
+    await waitForInitialTranscriptRead();
+    const first = await stream.nextEvent();
+    await stream.close();
+
+    expect(first.event).toBe('working');
+    expect(first.data).toEqual({ at: expect.any(String), status: null });
+    expect(transcript.isContainerRunning).toHaveBeenCalledWith('shared-session');
+  });
+
+  it('stays quiet when no container runs for the session', async () => {
+    transcript.isContainerRunning.mockReturnValue(false);
+    const stream = await openStream();
+    await waitForInitialTranscriptRead();
+    await delay(150);
+    await adapter.setTyping?.('web:user-123', null, 'probe');
+    const next = await stream.nextEvent();
+    await stream.close();
+
+    expect(next).toEqual({ event: 'working', data: { at: expect.any(String), status: 'probe' } });
   });
 
   it('ignores typing refreshes for a member with no open stream', async () => {

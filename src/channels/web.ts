@@ -17,6 +17,7 @@ import { getMessagingGroupAgents, getMessagingGroupByPlatform } from '../db/mess
 import { findSessionByAgentGroup } from '../db/sessions.js';
 import { log } from '../log.js';
 import { HISTORY_DEFAULT_LIMIT, sessionHistory, type HistoryRow } from '../modules/cross-session-context/index.js';
+import { isContainerRunning } from '../container-runner.js';
 import { readOutboxFiles } from '../session-manager.js';
 import type { ChannelAdapter, ChannelDefaults, ChannelSetup, OutboundMessage } from './adapter.js';
 import { registerChannelAdapter } from './channel-registry.js';
@@ -24,6 +25,7 @@ import { registerChannelAdapter } from './channel-registry.js';
 const AUTH_CACHE_MS = 60_000;
 const VERIFIED_USERS_MAX = 512;
 const HEARTBEAT_MS = 25_000;
+const WORKING_EVERY_TICKS = 4;
 const TRANSCRIPT_POLL_MS = 1_000;
 const WEB_TOOLS = new Set(['twyn-ask', 'twyn-query', 'twyn-portal-nav', 'twyn-repo-ask']);
 const WEB_MODES = new Set(['standard', 'simple', 'eli5', 'showme']);
@@ -398,6 +400,25 @@ export function createWebAdapter(options: WebAdapterOptions = {}): ChannelAdapte
     }
   }
 
+  function writeWorking(platformId: string, status: string | null): void {
+    const clients = streams.get(platformId);
+    if (!clients) return;
+    const payload = JSON.stringify({ at: new Date().toISOString(), status });
+    for (const client of clients) {
+      if (!client.response.writableEnded) client.response.write(`event: working\ndata: ${payload}\n\n`);
+    }
+  }
+
+  async function emitWorkingWhileRunning(platformId: string): Promise<void> {
+    try {
+      const session = await resolveSession(platformId);
+      if (!session || !isContainerRunning(session.id)) return;
+      writeWorking(platformId, null);
+    } catch (err) {
+      log.warn('Web channel working probe failed', { err, platformId });
+    }
+  }
+
   function emitTranscript(client: WebStreamClient, row: HistoryRow, backfill: boolean): void {
     if (client.response.writableEnded) return;
     client.response.write(`data: ${JSON.stringify({ ...row, backfill })}\n\n`);
@@ -466,8 +487,14 @@ export function createWebAdapter(options: WebAdapterOptions = {}): ChannelAdapte
     clients.add(client);
 
     if (!pollers.has(platformId)) {
+      // The typing module only fires while the agent's heartbeat file is fresh, which drops
+      // out during a cold container start and inside long generations. A container that exists
+      // for the member's session is the honest "working" signal, so emit it every 4 s as well.
+      let ticks = 0;
       const poller = setInterval(() => {
         void refreshTranscript(platformId);
+        ticks += 1;
+        if (ticks % WORKING_EVERY_TICKS === 0) void emitWorkingWhileRunning(platformId);
       }, pollIntervalMs);
       poller.unref();
       pollers.set(platformId, poller);
@@ -542,12 +569,7 @@ export function createWebAdapter(options: WebAdapterOptions = {}): ChannelAdapte
     // typing indicator, so each call becomes a named SSE event the page turns into a live
     // "working" state; the page lets it expire when the calls stop.
     async setTyping(platformId, _threadId, status): Promise<void> {
-      const clients = streams.get(platformId);
-      if (!clients) return;
-      const payload = JSON.stringify({ at: new Date().toISOString(), status: status ?? null });
-      for (const client of clients) {
-        if (!client.response.writableEnded) client.response.write(`event: working\ndata: ${payload}\n\n`);
-      }
+      writeWorking(platformId, status ?? null);
     },
   };
 

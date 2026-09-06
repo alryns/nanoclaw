@@ -50,6 +50,7 @@ import type { SupervisedHandle, SupervisedSnapshot } from './drivers/session-eve
 import { GROUP_FOLDER_LABEL, labelValueLegal, specInvalid } from './drivers/types.js';
 import type { ContainerSpec, MountSpec, SessionFailure, SessionSpec } from './drivers/types.js';
 import { getGatewayProvider, type GatewayContribution } from './gateway-providers/index.js';
+import { onSessionExited } from './gateway-providers/twyn-respawn.js';
 import { initGroupFilesystem } from './group-init.js';
 import { getAgentMailbox } from './mailbox/index.js';
 import { stopTypingRefresh } from './modules/typing/index.js';
@@ -575,6 +576,7 @@ async function finish(sessionId: string, runtime: ActiveSessionRuntime, failure?
   if (runtime.claimIncarnation !== undefined) {
     await releaseClaimQuietly(sessionId, runtime.claimIncarnation);
   }
+  onSessionExited({ sessionId, failure, stopReason: runtime.stopReason });
   for (const callback of runtime.exitCallbacks) {
     try {
       callback();

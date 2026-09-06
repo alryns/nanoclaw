@@ -89,6 +89,10 @@ Registry branches add their own deps on top of upstream's. Skill `nc:dep` direct
    Consumed by `GET /web/history` in `src/channels/web.ts`. On rebase, re-apply as an optional
    argument; a cutoff reads the full transcript (the mailbox API is newest-first only).
 4. Outbound history rows carry the message id so the web adapter can serve outbox files.
-5. `container/Dockerfile` installs `python3` (stdlib only, no pip) so the vendored diagram-design
+5. `src/container-runner.ts` calls the fork-owned `onSessionExited` hook after normal exit
+   finalization. `src/gateway-providers/twyn-respawn.ts` observes unexpected non-zero exits and
+   asks the existing wake seam to recover due work. On rebase, retain the import and this one hook
+   call after claim release, before exit callbacks.
+6. `container/Dockerfile` installs `python3` (stdlib only, no pip) so the vendored diagram-design
    verify scripts under the platform-skills mount can run inside the agent container. On
    rebase, re-add the one apt line.

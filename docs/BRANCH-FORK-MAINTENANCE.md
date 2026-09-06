@@ -105,3 +105,8 @@ Registry branches add their own deps on top of upstream's. Skill `nc:dep` direct
    and `/home/node/.local/bin/graphify`, one block before the ncl wrapper. Developer mode only
    (the bundle's `twyn-repo-ask` skill, `TWYNBRAIN_DEVELOPER=1`); cohort containers carry it inert.
    Bump `GRAPHIFY_VERSION` only together with a bundle whose graph was rebuilt on that version.
+8. `src/cli/resources/groups.ts` `config add-mount` accepts `--rw`, stored as `readonly: false`. The
+   mount policy (`modules/mount-security`) grants read-write only on an explicit `readonly === false`
+   inside an `allowReadWrite` root; upstream's CLI could only set `readonly: true` or nothing, so no
+   read-write mount was expressible. Used for the developer repo-graph cache. On rebase, keep the
+   one spread expression.

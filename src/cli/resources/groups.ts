@@ -559,7 +559,7 @@ registerResource({
       description:
         "Mount a host directory into a group's containers. OPERATOR-ONLY — never runnable from " +
         'inside a container (mounting host paths is a filesystem-access boundary). Requires ' +
-        '`ncl groups restart` to take effect. Use --id <group-id> --host <host-path> --container <container-path> [--ro].',
+        '`ncl groups restart` to take effect. Use --id <group-id> --host <host-path> --container <container-path> [--ro|--rw].',
       handler: async (args) => {
         const id = args.id as string;
         if (!id) throw new Error('--id is required');
@@ -573,7 +573,10 @@ registerResource({
         const mount: AdditionalMountConfig = {
           hostPath,
           containerPath,
-          ...(args.ro || args.readonly ? { readonly: true } : {}),
+          // TwynOracle fork knob 8: --rw stores readonly:false, the only value the mount policy
+          // accepts as a read-write request (unset is forced read-only). Upstream had no way to
+          // express it from the CLI.
+          ...(args.rw ? { readonly: false } : args.ro || args.readonly ? { readonly: true } : {}),
         };
         const existing = JSON.parse(row.additional_mounts) as AdditionalMountConfig[];
         if (!existing.some((m) => m.hostPath === hostPath && m.containerPath === containerPath)) {

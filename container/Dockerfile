@@ -121,6 +121,25 @@ RUN --mount=type=cache,target=/root/.cache/pnpm \
 COPY managed-settings.json /etc/claude-code/managed-settings.json
 RUN chmod 0644 /etc/claude-code/managed-settings.json
 
+# ---- graphify CLI (TwynOracle fork knob 7) -----------------------------------
+# Developer mode (TWYNBRAIN_DEVELOPER=1, set per group by the platform provisioner) lets the
+# bundle's twyn-repo-ask skill query its code graph with the graphify CLI, pinned to the
+# version the artifact was built with (bundle manifest developer_requirements.cli). Own venv,
+# so the system python3 (knob 6) stays stdlib-only. Inert on cohort containers, which never
+# see the env var. The skill addresses ~/.local/bin/graphify; /usr/local/bin is the PATH copy.
+ARG GRAPHIFY_VERSION=0.9.37
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    --mount=type=cache,target=/root/.cache/pip \
+    apt-get update && apt-get install -y --no-install-recommends python3-venv \
+    && rm -rf /var/lib/apt/lists/* \
+    && python3 -m venv /opt/graphify \
+    && /opt/graphify/bin/pip install "graphifyy==${GRAPHIFY_VERSION}" \
+    && ln -s /opt/graphify/bin/graphify /usr/local/bin/graphify \
+    && mkdir -p /home/node/.local/bin \
+    && ln -s /opt/graphify/bin/graphify /home/node/.local/bin/graphify \
+    && chown -R node:node /home/node/.local
+
 # ---- ncl CLI wrapper ----------------------------------------------------------
 # Actual script lives in the mounted source at /app/src/cli/ncl.ts.
 RUN printf '#!/bin/sh\nexec bun /app/src/cli/ncl.ts "$@"\n' > /usr/local/bin/ncl && \

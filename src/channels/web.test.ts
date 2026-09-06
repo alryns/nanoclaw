@@ -49,6 +49,7 @@ let historyRows: HistoryRow[];
 interface OpenStream {
   close(): Promise<void>;
   next(): Promise<HistoryRow & { backfill: boolean }>;
+  nextEvent(): Promise<{ event: string | null; data: unknown }>;
 }
 
 function eventFromInbound(platformId: string, threadId: string | null, message: InboundEvent['message']): InboundEvent {
@@ -98,6 +99,30 @@ async function openStream(token = 'stream-token'): Promise<OpenStream> {
   return {
     async close(): Promise<void> {
       await reader!.cancel();
+    },
+    async nextEvent(): Promise<{ event: string | null; data: unknown }> {
+      for (;;) {
+        const boundary = buffer.indexOf('\n\n');
+        if (boundary >= 0) {
+          const raw = buffer.slice(0, boundary);
+          buffer = buffer.slice(boundary + 2);
+          if (raw.startsWith(':')) continue;
+          const lines = raw.split('\n');
+          const event =
+            lines
+              .find((line) => line.startsWith('event:'))
+              ?.slice('event:'.length)
+              .trim() ?? null;
+          const data = lines
+            .filter((line) => line.startsWith('data:'))
+            .map((line) => line.slice('data:'.length).trimStart())
+            .join('\n');
+          return { event, data: JSON.parse(data) };
+        }
+        const chunk = await reader!.read();
+        if (chunk.done) throw new Error('SSE stream ended before the next event');
+        buffer += new TextDecoder().decode(chunk.value);
+      }
     },
     async next(): Promise<HistoryRow & { backfill: boolean }> {
       for (;;) {
@@ -292,6 +317,24 @@ describe('web channel', () => {
 
     expect(fs.readFileSync(stored('msg-first-file', 'first.svg'), 'utf8')).toBe('<svg/>');
     expect(fs.readFileSync(stored('msg-second-file', 'second.svg'), 'utf8')).toBe('<svg><g/></svg>');
+  });
+
+  it('turns typing refreshes into named working events on the member stream', async () => {
+    const stream = await openStream();
+    await waitForInitialTranscriptRead();
+    await adapter.setTyping?.('web:user-123', null);
+    const first = await stream.nextEvent();
+    await adapter.setTyping?.('web:user-123', null, 'Reading the vault');
+    const second = await stream.nextEvent();
+    await stream.close();
+
+    expect(first.event).toBe('working');
+    expect(first.data).toEqual({ at: expect.any(String), status: null });
+    expect(second).toEqual({ event: 'working', data: { at: expect.any(String), status: 'Reading the vault' } });
+  });
+
+  it('ignores typing refreshes for a member with no open stream', async () => {
+    await expect(adapter.setTyping?.('web:nobody', null)).resolves.toBeUndefined();
   });
 
   it('refuses to retain a file whose name has a path separator', async () => {

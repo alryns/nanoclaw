@@ -536,6 +536,19 @@ export function createWebAdapter(options: WebAdapterOptions = {}): ChannelAdapte
       await refreshTranscript(platformId);
       return undefined;
     },
+
+    // NanoClaw's typing module calls this every few seconds while the agent's heartbeat is
+    // fresh (immediately on inbound, paused briefly after each delivery). Browsers have no
+    // typing indicator, so each call becomes a named SSE event the page turns into a live
+    // "working" state; the page lets it expire when the calls stop.
+    async setTyping(platformId, _threadId, status): Promise<void> {
+      const clients = streams.get(platformId);
+      if (!clients) return;
+      const payload = JSON.stringify({ at: new Date().toISOString(), status: status ?? null });
+      for (const client of clients) {
+        if (!client.response.writableEnded) client.response.write(`event: working\ndata: ${payload}\n\n`);
+      }
+    },
   };
 
   async function handleRequest(req: IncomingMessage, res: ServerResponse, config: ChannelSetup): Promise<void> {

@@ -18,7 +18,7 @@ import { findSessionByAgentGroup } from '../db/sessions.js';
 import { log } from '../log.js';
 import { HISTORY_DEFAULT_LIMIT, sessionHistory, type HistoryRow } from '../modules/cross-session-context/index.js';
 import { isContainerRunning } from '../container-runner.js';
-import { readOutboxFiles } from '../session-manager.js';
+import { heartbeatPath, readOutboxFiles } from '../session-manager.js';
 import type { ChannelAdapter, ChannelDefaults, ChannelSetup, OutboundMessage } from './adapter.js';
 import { registerChannelAdapter } from './channel-registry.js';
 
@@ -30,6 +30,7 @@ const TRANSCRIPT_POLL_MS = 1_000;
 const WEB_TOOLS = new Set(['twyn-ask', 'twyn-query', 'twyn-portal-nav', 'twyn-repo-ask']);
 const WEB_MODES = new Set(['standard', 'simple', 'eli5', 'showme']);
 const WEB_FILES_ROOT = path.join(DATA_DIR, 'web-files');
+const RUNNER_STATUS_FILENAME = '.status';
 
 /**
  * A browser session is a private authenticated DM: every submitted message is
@@ -271,6 +272,16 @@ function markRowSent(row: HistoryRow, highWaterMark: TranscriptHighWaterMark | n
   return highWaterMark;
 }
 
+function readRunnerStatus(agentGroupId: string, sessionId: string): string | null {
+  const statusPath = path.join(path.dirname(heartbeatPath(agentGroupId, sessionId)), RUNNER_STATUS_FILENAME);
+  try {
+    return fs.readFileSync(statusPath, 'utf8').trim() || null;
+  } catch {
+    // ENOENT is normal before the runner has published a phase.
+    return null;
+  }
+}
+
 export function createWebAdapter(options: WebAdapterOptions = {}): ChannelAdapter {
   const port = options.port ?? TWYN_WEB_PORT;
   const pollIntervalMs = options.pollIntervalMs ?? TRANSCRIPT_POLL_MS;
@@ -409,11 +420,20 @@ export function createWebAdapter(options: WebAdapterOptions = {}): ChannelAdapte
     }
   }
 
+  async function runnerStatusFor(platformId: string): Promise<string | null> {
+    try {
+      const session = await resolveSession(platformId);
+      return session ? readRunnerStatus(session.agent_group_id, session.id) : null;
+    } catch {
+      return null;
+    }
+  }
+
   async function emitWorkingWhileRunning(platformId: string): Promise<void> {
     try {
       const session = await resolveSession(platformId);
       if (!session || !isContainerRunning(session.id)) return;
-      writeWorking(platformId, null);
+      writeWorking(platformId, readRunnerStatus(session.agent_group_id, session.id));
     } catch (err) {
       log.warn('Web channel working probe failed', { err, platformId });
     }
@@ -568,8 +588,11 @@ export function createWebAdapter(options: WebAdapterOptions = {}): ChannelAdapte
     // fresh (immediately on inbound, paused briefly after each delivery). Browsers have no
     // typing indicator, so each call becomes a named SSE event the page turns into a live
     // "working" state; the page lets it expire when the calls stop.
+    // Without a status of its own the call carries the runner's phase (the .status file), so
+    // the page does not flicker between the phase text and the generic line as the two 4 s
+    // sources (this hook and emitWorkingWhileRunning) interleave.
     async setTyping(platformId, _threadId, status): Promise<void> {
-      writeWorking(platformId, status ?? null);
+      writeWorking(platformId, status ?? (await runnerStatusFor(platformId)));
     },
   };
 

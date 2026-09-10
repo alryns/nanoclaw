@@ -32,7 +32,11 @@ vi.mock('../db/messaging-groups.js', () => ({
 vi.mock('../db/sessions.js', () => ({ findSessionByAgentGroup: transcript.findSessionByAgentGroup }));
 vi.mock('../container-runner.js', () => ({ isContainerRunning: transcript.isContainerRunning }));
 
-vi.mock('../session-manager.js', () => ({ readOutboxFiles: transcript.readOutboxFiles }));
+vi.mock('../session-manager.js', () => ({
+  heartbeatPath: (agentGroupId: string, sessionId: string) =>
+    `${WEB_FILES_TEST_DATA_DIR}/v2-sessions/${agentGroupId}/${sessionId}/.heartbeat`,
+  readOutboxFiles: transcript.readOutboxFiles,
+}));
 
 vi.mock('../modules/cross-session-context/index.js', () => ({
   HISTORY_DEFAULT_LIMIT: 50,
@@ -335,6 +339,20 @@ describe('web channel', () => {
     expect(second).toEqual({ event: 'working', data: { at: expect.any(String), status: 'Reading the vault' } });
   });
 
+  it('fills a status-less typing refresh from the runner status file', async () => {
+    const statusPath = path.join(WEB_FILES_TEST_DATA_DIR, 'v2-sessions', 'agent-group', 'shared-session', '.status');
+    fs.mkdirSync(path.dirname(statusPath), { recursive: true });
+    fs.writeFileSync(statusPath, 'Reading sources\n');
+
+    const stream = await openStream();
+    await waitForInitialTranscriptRead();
+    await adapter.setTyping?.('web:user-123', null);
+    const event = await stream.nextEvent();
+    await stream.close();
+
+    expect(event).toEqual({ event: 'working', data: { at: expect.any(String), status: 'Reading sources' } });
+  });
+
   it('emits working events on its own while a container runs for the session', async () => {
     transcript.isContainerRunning.mockReturnValue(true);
     const stream = await openStream();
@@ -345,6 +363,20 @@ describe('web channel', () => {
     expect(first.event).toBe('working');
     expect(first.data).toEqual({ at: expect.any(String), status: null });
     expect(transcript.isContainerRunning).toHaveBeenCalledWith('shared-session');
+  });
+
+  it('includes the runner status file in working events while a container runs', async () => {
+    const statusPath = path.join(WEB_FILES_TEST_DATA_DIR, 'v2-sessions', 'agent-group', 'shared-session', '.status');
+    fs.mkdirSync(path.dirname(statusPath), { recursive: true });
+    fs.writeFileSync(statusPath, '  Drawing  \n');
+    transcript.isContainerRunning.mockReturnValue(true);
+
+    const stream = await openStream();
+    await waitForInitialTranscriptRead();
+    const first = await stream.nextEvent();
+    await stream.close();
+
+    expect(first).toEqual({ event: 'working', data: { at: expect.any(String), status: 'Drawing' } });
   });
 
   it('stays quiet when no container runs for the session', async () => {

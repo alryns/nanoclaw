@@ -28,6 +28,7 @@ import {
   type RoutingContext,
 } from './formatter.js';
 import { stripHarnessTagArtifacts } from './harness-tag-strip.js';
+import { clearTurnStatus } from './twyn-status.js';
 import { isUploadTraceCommand, uploadTrace } from './upload-trace.js';
 import type { AgentProvider, AgentQuery, ProviderEvent, ProviderExchange } from './providers/types.js';
 
@@ -652,6 +653,8 @@ export async function processQuery(
     });
     throw err;
   } finally {
+    // TwynOracle fork knob: clear a status left by an interrupted active turn.
+    clearTurnStatus();
     done = true;
     clearInterval(pollHandle);
   }

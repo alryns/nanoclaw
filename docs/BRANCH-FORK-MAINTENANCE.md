@@ -110,3 +110,8 @@ Registry branches add their own deps on top of upstream's. Skill `nc:dep` direct
    inside an `allowReadWrite` root; upstream's CLI could only set `readonly: true` or nothing, so no
    read-write mount was expressible. Used for the developer repo-graph cache. On rebase, keep the
    one spread expression.
+9. `container/agent-runner/src/providers/claude.ts` instantiates the fork-owned `twyn-status` observer
+   and passes each raw Claude SDK message to it. On rebase, retain the import, observer construction,
+   and one call inside `translateEvents` before provider-event translation.
+10. `container/agent-runner/src/poll-loop.ts` clears the fork-owned turn-status file when an active query
+    exits unexpectedly. On rebase, retain the import and one cleanup call in `processQuery`'s `finally`.

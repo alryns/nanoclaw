@@ -7,6 +7,7 @@ import { query as sdkQuery, type HookCallback, type PreCompactHookInput } from '
 import { clearContainerToolInFlight, setContainerToolInFlight } from '../db/container-state.js';
 import type { MemorySessionHookRegistration } from '../memory/session-hook.js';
 import { TIMEZONE, formatLocalStamp } from '../timezone.js';
+import { createTwynStatusObserver } from '../twyn-status.js';
 import { shimCwd } from './cwd-shim.js';
 import { registerProvider } from './provider-registry.js';
 import type {
@@ -589,12 +590,15 @@ export class ClaudeProvider implements AgentProvider {
     });
 
     let aborted = false;
+    // TwynOracle fork knob: surface SDK work phases through the status file.
+    const statusObserver = createTwynStatusObserver();
 
     async function* translateEvents(): AsyncGenerator<ProviderEvent> {
       let messageCount = 0;
       for await (const message of sdkResult) {
         if (aborted) return;
         messageCount++;
+        statusObserver.observe(message);
 
         // Yield activity for every SDK event so the poll loop knows the agent is working
         yield { type: 'activity' };

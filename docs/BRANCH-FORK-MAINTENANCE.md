@@ -111,7 +111,9 @@ Registry branches add their own deps on top of upstream's. Skill `nc:dep` direct
    read-write mount was expressible. Used for the developer repo-graph cache. On rebase, keep the
    one spread expression.
 9. `container/agent-runner/src/providers/claude.ts` instantiates the fork-owned `twyn-status` observer
-   and passes each raw Claude SDK message to it. On rebase, retain the import, observer construction,
-   and one call inside `translateEvents` before provider-event translation.
+   and passes each raw Claude SDK message to it; the PreCompact hook writes "Tidying memory" before
+   compaction starts (compact_boundary only arrives after it). On rebase, retain the import, observer
+   construction, one call inside `translateEvents` before provider-event translation, and the one
+   `writeTurnStatus` line at the top of `createPreCompactHook`.
 10. `container/agent-runner/src/poll-loop.ts` clears the fork-owned turn-status file when an active query
     exits unexpectedly. On rebase, retain the import and one cleanup call in `processQuery`'s `finally`.

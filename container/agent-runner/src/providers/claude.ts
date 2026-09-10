@@ -7,7 +7,7 @@ import { query as sdkQuery, type HookCallback, type PreCompactHookInput } from '
 import { clearContainerToolInFlight, setContainerToolInFlight } from '../db/container-state.js';
 import type { MemorySessionHookRegistration } from '../memory/session-hook.js';
 import { TIMEZONE, formatLocalStamp } from '../timezone.js';
-import { createTwynStatusObserver } from '../twyn-status.js';
+import { createTwynStatusObserver, writeTurnStatus } from '../twyn-status.js';
 import { shimCwd } from './cwd-shim.js';
 import { registerProvider } from './provider-registry.js';
 import type {
@@ -325,6 +325,9 @@ function archiveTranscriptFile(
 function createPreCompactHook(assistantName?: string): HookCallback {
   return async (input) => {
     const preCompact = input as PreCompactHookInput;
+    // TwynOracle fork knob 9: compaction is the silent minutes; compact_boundary only arrives
+    // after it, so the phase has to be published here, before the model call starts.
+    writeTurnStatus('Tidying memory');
     archiveTranscriptFile(preCompact.transcript_path, preCompact.session_id, assistantName);
     return {};
   };

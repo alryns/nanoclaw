@@ -4,12 +4,16 @@ import os from 'os';
 import path from 'path';
 
 const sdkMessages: unknown[] = [];
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let capturedOptions: any = null;
 
 mock.module('@anthropic-ai/claude-agent-sdk', () => ({
-  query: () =>
-    (async function* () {
+  query: (args: { options?: unknown }) => {
+    capturedOptions = args?.options ?? null;
+    return (async function* () {
       for (const message of sdkMessages) yield message;
-    })(),
+    })();
+  },
 }));
 
 const { ClaudeProvider } = await import('./providers/claude.js');
@@ -58,5 +62,28 @@ describe('Claude compact-boundary status', () => {
 
     expect(sawCompactionStatus).toBe(true);
     expect(fs.existsSync(statusFilePath())).toBe(false);
+  });
+
+  it('publishes Tidying memory from the PreCompact hook, before compaction runs', async () => {
+    sdkMessages.length = 0;
+    sdkMessages.push({ type: 'system', subtype: 'init', session_id: 'sess-2' });
+    const provider = new ClaudeProvider({});
+    provider.registerMemorySessionHook(MEMORY_SESSION_HOOK);
+    for await (const _event of provider.query({ prompt: 'hi', cwd: tmp }).events) {
+      // drain
+    }
+    const preCompact = capturedOptions?.hooks?.PreCompact?.[0]?.hooks?.[0];
+    expect(typeof preCompact).toBe('function');
+    await preCompact(
+      {
+        hook_event_name: 'PreCompact',
+        session_id: 'sess-2',
+        transcript_path: path.join(tmp, 'missing.jsonl'),
+        trigger: 'auto',
+      },
+      undefined,
+      { signal: new AbortController().signal },
+    );
+    expect(fs.readFileSync(statusFilePath(), 'utf8')).toBe('Tidying memory\n');
   });
 });

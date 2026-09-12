@@ -41,7 +41,7 @@ afterEach(() => {
 });
 
 describe('Claude compact-boundary status', () => {
-  it('publishes Tidying memory before the compact boundary is translated', async () => {
+  it('publishes the compaction notice before the compact boundary is translated', async () => {
     sdkMessages.length = 0;
     sdkMessages.push(
       { type: 'system', subtype: 'init', session_id: 'sess-1' },
@@ -55,7 +55,9 @@ describe('Claude compact-boundary status', () => {
     let sawCompactionStatus = false;
     for await (const _event of events) {
       if (fs.existsSync(statusFilePath())) {
-        expect(fs.readFileSync(statusFilePath(), 'utf8')).toBe('Tidying memory (133k tokens)\n');
+        expect(fs.readFileSync(statusFilePath(), 'utf8')).toBe(
+          'Summarising the chat so far, this takes a minute (133k tokens)\n',
+        );
         sawCompactionStatus = true;
       }
     }
@@ -64,7 +66,7 @@ describe('Claude compact-boundary status', () => {
     expect(fs.existsSync(statusFilePath())).toBe(false);
   });
 
-  it('publishes Tidying memory from the PreCompact hook, before compaction runs', async () => {
+  it('publishes the compaction notice from the PreCompact hook, before compaction runs', async () => {
     sdkMessages.length = 0;
     sdkMessages.push({ type: 'system', subtype: 'init', session_id: 'sess-2' });
     const provider = new ClaudeProvider({});
@@ -84,6 +86,6 @@ describe('Claude compact-boundary status', () => {
       undefined,
       { signal: new AbortController().signal },
     );
-    expect(fs.readFileSync(statusFilePath(), 'utf8')).toBe('Tidying memory\n');
+    expect(fs.readFileSync(statusFilePath(), 'utf8')).toBe('Summarising the chat so far, this takes a minute\n');
   });
 });

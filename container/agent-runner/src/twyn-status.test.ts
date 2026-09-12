@@ -74,7 +74,9 @@ describe('Twyn runner status phases', () => {
   it('publishes compaction and drafting statuses, then clears them at the result boundary', () => {
     const observer = createTwynStatusObserver();
     observer.observe({ type: 'system', subtype: 'compact_boundary', compact_metadata: { pre_tokens: 131_000 } });
-    expect(fs.readFileSync(statusFilePath(), 'utf8')).toBe('Tidying memory (131k tokens)\n');
+    expect(fs.readFileSync(statusFilePath(), 'utf8')).toBe(
+      'Summarising the chat so far, this takes a minute (131k tokens)\n',
+    );
 
     observer.observe({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Read', input: {} }] } });
     expect(fs.readFileSync(statusFilePath(), 'utf8')).toBe('Reading sources\n');

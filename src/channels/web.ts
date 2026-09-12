@@ -133,7 +133,7 @@ function contentDispositionFilename(filename: string): string {
 
 /**
  * The member's own bubble should not echo the steer line the adapter prefixed for the agent
- * ([twynoracle tool=.. mode=..]); the stored text keeps it so the agent still sees it.
+ * ([twynoracle tool=.. mode=.. explore=off]); the stored text keeps it so the agent still sees it.
  */
 const STEER_LINE = /^\[twynoracle(?: [a-z]+=[A-Za-z0-9-]+)*\]\n/;
 export function displayRow<T extends { direction: string; text: string }>(row: T): T {
@@ -742,10 +742,15 @@ export function createWebAdapter(options: WebAdapterOptions = {}): ChannelAdapte
           sendStatus(res, 400, 'invalid mode');
           return;
         }
+        const explore = 'explore' in payload ? payload.explore : undefined;
+        if (explore !== undefined && typeof explore !== 'boolean') {
+          sendStatus(res, 400, 'invalid explore');
+          return;
+        }
         const text =
-          tool === undefined && mode === 'standard'
+          tool === undefined && mode === 'standard' && explore !== false
             ? payload.text
-            : `[twynoracle${tool ? ` tool=${tool}` : ''}${mode !== 'standard' ? ` mode=${mode}` : ''}]\n${payload.text}`;
+            : `[twynoracle${tool ? ` tool=${tool}` : ''}${mode !== 'standard' ? ` mode=${mode}` : ''}${explore === false ? ' explore=off' : ''}]\n${payload.text}`;
         await config.onInbound(platformId, null, {
           id: `web-${Date.now()}-${randomUUID()}`,
           kind: 'chat',

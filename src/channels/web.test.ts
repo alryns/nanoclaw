@@ -686,6 +686,19 @@ describe('web channel', () => {
     );
   });
 
+  it('prefixes an Explore opt-out on its own first line', async () => {
+    const response = await nativeFetch(messageUrl(), {
+      method: 'POST',
+      headers: { Authorization: 'Bearer explore-off-token' },
+      body: JSON.stringify({ text: 'explain this', explore: false }),
+    });
+
+    expect(response.status).toBe(202);
+    expect(inbound[0]?.message.content).toBe(
+      JSON.stringify({ text: '[twynoracle explore=off]\nexplain this', sender: 'web', senderId: 'web:user-123' }),
+    );
+  });
+
   it.each([null, '', 'unknown', true, 1])('rejects invalid tool %j', async (tool) => {
     const response = await nativeFetch(messageUrl(), {
       method: 'POST',
@@ -844,6 +857,7 @@ describe('displayRow', () => {
   it('strips a leading steer line from inbound rows only', async () => {
     const { displayRow } = await import('./web.js');
     expect(displayRow({ direction: 'in', text: '[twynoracle tool=twyn-ask mode=eli5]\nhello' }).text).toBe('hello');
+    expect(displayRow({ direction: 'in', text: '[twynoracle explore=off]\nhello' }).text).toBe('hello');
     expect(displayRow({ direction: 'in', text: 'plain' }).text).toBe('plain');
     expect(displayRow({ direction: 'out', text: '[twynoracle mode=eli5]\nx' }).text).toBe('[twynoracle mode=eli5]\nx');
   });

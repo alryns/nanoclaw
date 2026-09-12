@@ -327,7 +327,7 @@ function createPreCompactHook(assistantName?: string): HookCallback {
     const preCompact = input as PreCompactHookInput;
     // TwynOracle fork knob 9: compaction is the silent minutes; compact_boundary only arrives
     // after it, so the phase has to be published here, before the model call starts.
-    writeTurnStatus('Tidying memory');
+    writeTurnStatus('Summarising the chat so far, this takes a minute');
     archiveTranscriptFile(preCompact.transcript_path, preCompact.session_id, assistantName);
     return {};
   };

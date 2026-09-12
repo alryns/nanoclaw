@@ -100,10 +100,12 @@ export function clearTurnStatus(): void {
 }
 
 function compactedTokenCount(tokens: number | null): string {
-  if (tokens === null || !Number.isFinite(tokens) || tokens <= 0) return 'Tidying memory';
-  if (tokens < 1_000) return `Tidying memory (${Math.round(tokens)} tokens)`;
-  if (tokens < 1_000_000) return `Tidying memory (${Math.round(tokens / 1_000)}k tokens)`;
-  return `Tidying memory (${(Math.round((tokens / 1_000_000) * 10) / 10).toString()}m tokens)`;
+  if (tokens === null || !Number.isFinite(tokens) || tokens <= 0)
+    return 'Summarising the chat so far, this takes a minute';
+  if (tokens < 1_000) return `Summarising the chat so far, this takes a minute (${Math.round(tokens)} tokens)`;
+  if (tokens < 1_000_000)
+    return `Summarising the chat so far, this takes a minute (${Math.round(tokens / 1_000)}k tokens)`;
+  return `Summarising the chat so far, this takes a minute (${(Math.round((tokens / 1_000_000) * 10) / 10).toString()}m tokens)`;
 }
 
 function compactBoundaryTokens(message: Record<string, unknown>): number | null {

@@ -1,11 +1,31 @@
-import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it, test } from 'bun:test';
 
-import { closeSessionDb, initTestSessionDb } from '../mailbox/sqlite/connection.js';
+import { closeSessionDb, getInboundDb, initTestSessionDb } from '../mailbox/sqlite/connection.js';
 import { getUndeliveredMessages } from '../db/messages-out.js';
-import { LINK_ACTION_SCHEMA, sendCard } from './interactive.js';
+import {
+  LINK_ACTION_SCHEMA,
+  askUserQuestion,
+  questionExpiryContent,
+  questionTimeoutSeconds,
+  sendCard,
+  WEB_QUESTION_TIMEOUT_SECONDS,
+} from './interactive.js';
 
 beforeEach(() => initTestSessionDb());
 afterEach(() => closeSessionDb());
+
+function seedWebRouting(): void {
+  const db = getInboundDb();
+  db.exec(`CREATE TABLE session_routing (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    channel_type TEXT, platform_id TEXT, thread_id TEXT
+  )`);
+  db.prepare('INSERT INTO session_routing (id, channel_type, platform_id, thread_id) VALUES (1, ?, ?, ?)').run(
+    'web',
+    'web:member-1',
+    null,
+  );
+}
 
 describe('send_card', () => {
   it('tells the agent when callback actions will be dropped', async () => {
@@ -162,4 +182,31 @@ describe('send_card', () => {
 
     expect(result.content[0].text).toMatch(/^Card sent \(id: msg-[^)]+\)$/);
   });
+});
+
+test('web question timeout cap is a single 120-second constant', () => {
+  expect(WEB_QUESTION_TIMEOUT_SECONDS).toBe(120);
+  expect(questionTimeoutSeconds('web', 300)).toBe(120);
+  expect(questionTimeoutSeconds('web', 20)).toBe(20);
+  expect(questionTimeoutSeconds('slack', 300)).toBe(300);
+  expect(questionExpiryContent('web', 'q-1')).toEqual({ type: 'ask_question_expired', questionId: 'q-1' });
+  expect(questionExpiryContent('slack', 'q-1')).toBeUndefined();
+});
+
+test('writes an expiry record for every timed out web question', async () => {
+  seedWebRouting();
+
+  const result = await askUserQuestion.handler({
+    title: 'Choose',
+    question: 'Which option?',
+    options: ['One'],
+    // A short request keeps the test fast. Web still uses the same timeout
+    // path as its 120-second default and must always write the expiry record.
+    timeout: 0.001,
+  });
+
+  expect(result.isError).toBe(true);
+  const messages = getUndeliveredMessages().map((message) => JSON.parse(message.content));
+  expect(messages).toHaveLength(2);
+  expect(messages[1]).toEqual({ type: 'ask_question_expired', questionId: messages[0].questionId });
 });

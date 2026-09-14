@@ -22,7 +22,8 @@ export interface ChannelSetup {
   onMetadata(platformId: string, name?: string, isGroup?: boolean): void;
 
   /** Called when a user clicks a button/action in a card (e.g., ask_user_question response). */
-  onAction(questionId: string, selectedOption: string, userId: string): void;
+  // TwynOracle fork: web needs the claimed result to reject duplicate card clicks.
+  onAction(questionId: string, selectedOption: string, userId: string): void | Promise<boolean>;
 }
 
 /** Delivery address used for reply-to overrides and (normally) the inbound's own origin. */

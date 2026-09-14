@@ -29,10 +29,12 @@ export interface HistoryRow {
   kind: string;
   sender: string;
   text: string;
-  /** Outbound message id when the row declares outbox files. */
+  /** Outbound message id, used for outbox files and stable transcript card updates. */
   messageId?: string;
   /** Declared outbound outbox filenames, when present. */
   files?: string[];
+  /** TwynOracle fork: structured web-card data, never raw HTML. */
+  card?: Record<string, unknown>;
 }
 
 function normalizeBefore(value: unknown): string | undefined {
@@ -48,7 +50,13 @@ function cell(value: string): string {
   return value.replace(/\s+/g, ' ').replace(/\|/g, '/').trim().slice(0, HISTORY_TEXT_MAX_CHARS);
 }
 
-function parseText(raw: string): { text: string; sender: string | null; files?: string[] } {
+function parseText(raw: string): {
+  text: string;
+  sender: string | null;
+  files?: string[];
+  card?: Record<string, unknown>;
+  hidden?: boolean;
+} {
   try {
     const parsed = JSON.parse(raw) as Record<string, unknown>;
     const text =
@@ -63,7 +71,30 @@ function parseText(raw: string): { text: string; sender: string | null; files?: 
       parsed.files.every((file): file is string => typeof file === 'string')
         ? parsed.files
         : undefined;
-    return { text, sender: typeof parsed.sender === 'string' ? parsed.sender : null, files };
+    const card =
+      parsed.type === 'ask_question' &&
+      typeof parsed.questionId === 'string' &&
+      typeof parsed.title === 'string' &&
+      typeof parsed.question === 'string' &&
+      Array.isArray(parsed.options)
+        ? {
+            type: 'question',
+            questionId: parsed.questionId,
+            title: parsed.title,
+            question: parsed.question,
+            options: parsed.options,
+          }
+        : parsed.type === 'card' && parsed.card && typeof parsed.card === 'object'
+          ? { type: 'display', ...(parsed.card as Record<string, unknown>) }
+          : undefined;
+    // TwynOracle fork: expiry records update a card; they are never transcript replies.
+    return {
+      text,
+      sender: typeof parsed.sender === 'string' ? parsed.sender : null,
+      files,
+      card,
+      hidden: parsed.type === 'ask_question_expired',
+    };
   } catch {
     return { text: raw, sender: null };
   }
@@ -106,14 +137,17 @@ export async function sessionHistory(args: Record<string, unknown>, ctx: CallerC
       rows.push({ timestamp: r.timestamp, direction: 'in', kind: r.kind, sender: sender ?? '', text });
     }
     for (const r of history.outbound) {
-      const { text, files } = parseText(r.content);
+      const { text, files, card, hidden } = parseText(r.content);
+      if (hidden) continue;
       rows.push({
         timestamp: r.timestamp,
         direction: 'out',
         kind: r.kind,
         sender: agentName,
         text,
-        ...(files && typeof r.id === 'string' ? { messageId: r.id, files } : {}),
+        ...(typeof r.id === 'string' && (files || card) ? { messageId: r.id } : {}),
+        ...(files ? { files } : {}),
+        ...(card ? { card } : {}),
       });
     }
   }

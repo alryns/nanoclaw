@@ -15,6 +15,18 @@ const transcript = vi.hoisted(() => ({
   isContainerRunning: vi.fn(() => false),
   sessionHistory: vi.fn(),
 }));
+const cards = vi.hoisted(() => ({
+  addWebCardStates: vi.fn(async <T>(rows: T[]) => rows),
+  canAnswerWebQuestion: vi.fn(async () => true),
+  expireWebQuestions: vi.fn(async (): Promise<string[]> => []),
+  isWebCardContent: vi.fn(
+    (content: unknown) =>
+      !!content &&
+      typeof content === 'object' &&
+      ['ask_question', 'card', 'ask_question_expired'].includes((content as { type?: string }).type ?? ''),
+  ),
+  recordWebCard: vi.fn(async () => undefined),
+}));
 const WEB_FILES_TEST_DATA_DIR = vi.hoisted(() => '/tmp/nanoclaw-web-files-test');
 
 // A fixed test port keeps the actual browser-facing HTTP path under test while
@@ -43,6 +55,8 @@ vi.mock('../modules/cross-session-context/index.js', () => ({
   sessionHistory: transcript.sessionHistory,
 }));
 
+vi.mock('./web-cards.js', () => cards);
+
 import { createWebAdapter } from './web.js';
 
 const nativeFetch = globalThis.fetch;
@@ -51,6 +65,8 @@ const fetchMock = vi.fn();
 let adapter: ReturnType<typeof createWebAdapter>;
 let inbound: InboundEvent[];
 let historyRows: HistoryRow[];
+let actionCalls: Array<[string, string, string]>;
+let actionStateChange: (() => void | Promise<void>) | undefined;
 
 interface OpenStream {
   close(): Promise<void>;
@@ -80,6 +96,10 @@ function fileUrl(query = ''): string {
 
 function vaultUrl(query = ''): string {
   return `http://127.0.0.1:18091/web/vault${query}`;
+}
+
+function questionResponseUrl(): string {
+  return 'http://127.0.0.1:18091/web/question-response';
 }
 
 function row(
@@ -160,6 +180,8 @@ beforeEach(async () => {
   fs.rmSync(WEB_FILES_TEST_DATA_DIR, { recursive: true, force: true });
   inbound = [];
   historyRows = [];
+  actionCalls = [];
+  actionStateChange = undefined;
   fetchMock.mockReset();
   // A fresh Response per call: a Body can be read once, and real fetch never reuses one.
   fetchMock.mockImplementation(
@@ -170,6 +192,12 @@ beforeEach(async () => {
   transcript.findSessionByAgentGroup.mockReset();
   transcript.readOutboxFiles.mockReset();
   transcript.sessionHistory.mockReset();
+  cards.addWebCardStates.mockClear();
+  cards.canAnswerWebQuestion.mockReset();
+  cards.canAnswerWebQuestion.mockResolvedValue(true);
+  cards.expireWebQuestions.mockReset();
+  cards.expireWebQuestions.mockResolvedValue([]);
+  cards.recordWebCard.mockClear();
   transcript.getMessagingGroupByPlatform.mockResolvedValue({ id: 'web-messaging-group' });
   transcript.getMessagingGroupAgents.mockResolvedValue([{ agent_group_id: 'agent-group' }]);
   transcript.findSessionByAgentGroup.mockResolvedValue({ id: 'shared-session', agent_group_id: 'agent-group' });
@@ -187,12 +215,20 @@ beforeEach(async () => {
     },
     onInboundEvent() {},
     onMetadata() {},
-    onAction() {},
+    onAction: async (questionId, selectedOption, userId) => {
+      actionCalls.push([questionId, selectedOption, userId]);
+      await actionStateChange?.();
+      return true;
+    },
   });
 });
 
 afterEach(async () => {
   await adapter.teardown();
+  // TwynOracle fork: teardown force-closes this server's keep-alive sockets, but the client pool
+  // learns of the close on a later tick. Without a beat the next test's first request can reuse a
+  // dead socket and fail with "other side closed" (reproduced: an immediate retry succeeds).
+  await new Promise((resolve) => setTimeout(resolve, 10));
   vi.unstubAllEnvs();
   fs.rmSync(WEB_FILES_TEST_DATA_DIR, { recursive: true, force: true });
 });
@@ -202,6 +238,140 @@ afterAll(() => {
 });
 
 describe('web channel', () => {
+  it('routes one validated card answer through onAction', async () => {
+    const response = await nativeFetch(questionResponseUrl(), {
+      method: 'POST',
+      headers: { Authorization: 'Bearer answer-token', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ questionId: 'question-1', value: 'approve' }),
+    });
+
+    expect(response.status).toBe(202);
+    expect(cards.canAnswerWebQuestion).toHaveBeenCalledWith('shared-session', 'web:user-123', 'question-1', 'approve');
+    expect(actionCalls).toEqual([['question-1', 'approve', 'web:user-123']]);
+  });
+
+  it('pushes a claimed card state to every open stream without a reload', async () => {
+    historyRows = [
+      {
+        ...row('', '2026-09-04T10:00:00.000Z'),
+        messageId: 'question-1',
+        card: {
+          type: 'question',
+          questionId: 'question-1',
+          title: 'Choose',
+          question: 'Which?',
+          options: [],
+          state: 'pending',
+        },
+      },
+    ];
+    const first = await openStream('answer-first');
+    const second = await openStream('answer-second');
+    await first.next();
+    await second.next();
+    actionStateChange = () => {
+      historyRows = [
+        {
+          ...historyRows[0]!,
+          card: { ...(historyRows[0]!.card as Record<string, unknown>), state: 'answered', selectedLabel: 'Approved' },
+        },
+      ];
+    };
+
+    const response = await nativeFetch(questionResponseUrl(), {
+      method: 'POST',
+      headers: { Authorization: 'Bearer answer-state-token', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ questionId: 'question-1', value: 'approve' }),
+    });
+
+    expect(response.status).toBe(202);
+    await expect(first.next()).resolves.toMatchObject({ card: { state: 'answered', selectedLabel: 'Approved' } });
+    await expect(second.next()).resolves.toMatchObject({ card: { state: 'answered', selectedLabel: 'Approved' } });
+    await first.close();
+    await second.close();
+  });
+
+  it('pushes the runner expiry record state to an open stream', async () => {
+    historyRows = [
+      {
+        ...row('', '2026-09-04T10:00:00.000Z'),
+        messageId: 'question-1',
+        card: {
+          type: 'question',
+          questionId: 'question-1',
+          title: 'Choose',
+          question: 'Which?',
+          options: [],
+          state: 'pending',
+        },
+      },
+    ];
+    const stream = await openStream('expiry-stream');
+    await stream.next();
+    historyRows = [
+      {
+        ...historyRows[0]!,
+        card: { ...(historyRows[0]!.card as Record<string, unknown>), state: 'timed_out' },
+      },
+    ];
+
+    await adapter.deliver('web:user-123', null, {
+      kind: 'chat-sdk',
+      content: { type: 'ask_question_expired', questionId: 'question-1' },
+    });
+
+    await expect(stream.next()).resolves.toMatchObject({ card: { state: 'timed_out' } });
+    await stream.close();
+  });
+
+  it.each(['duplicate', 'forged', 'wrong-member', 'expired', 'invalid-option'])(
+    'rejects an unavailable %s card answer',
+    async () => {
+      cards.canAnswerWebQuestion.mockResolvedValueOnce(false);
+      const response = await nativeFetch(questionResponseUrl(), {
+        method: 'POST',
+        headers: { Authorization: 'Bearer rejected-answer-token', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ questionId: 'question-1', value: 'nope' }),
+      });
+
+      expect(response.status).toBe(409);
+      expect(actionCalls).toEqual([]);
+    },
+  );
+
+  it('delivers structured cards and keeps them in transcript history', async () => {
+    historyRows = [
+      {
+        ...row('', '2026-09-04T10:00:00.000Z'),
+        card: {
+          type: 'question',
+          questionId: 'question-1',
+          title: 'Choose',
+          question: 'Which?',
+          options: [],
+          state: 'pending',
+        },
+      },
+      {
+        ...row('', '2026-09-04T10:01:00.000Z'),
+        card: { type: 'display', title: 'Links', children: ['Read this'] },
+      },
+    ];
+    const stream = await openStream();
+    await waitForInitialTranscriptRead();
+    const first = await stream.next();
+    const second = await stream.next();
+    await stream.close();
+
+    expect(first.card).toMatchObject({ type: 'question', state: 'pending' });
+    expect(second.card).toMatchObject({ type: 'display', title: 'Links' });
+    await adapter.deliver('web:user-123', null, {
+      kind: 'chat-sdk',
+      content: { type: 'ask_question', questionId: 'question-1', title: 'Choose', question: 'Which?', options: [] },
+    });
+    expect(cards.recordWebCard).toHaveBeenCalled();
+  });
+
   it('returns 401 when history has no token', async () => {
     const response = await nativeFetch(historyUrl());
 

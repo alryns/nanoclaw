@@ -27,16 +27,18 @@ import { getResponseHandlers, type ResponsePayload } from './response-registry.j
 
 const hostAbortController = new AbortController();
 
-async function dispatchResponse(payload: ResponsePayload): Promise<void> {
+// TwynOracle fork: surface whether an interactive response was claimed.
+async function dispatchResponse(payload: ResponsePayload): Promise<boolean> {
   for (const handler of getResponseHandlers()) {
     try {
       const claimed = await handler(payload);
-      if (claimed) return;
+      if (claimed) return true;
     } catch (err) {
       log.error('Response handler threw', { questionId: payload.questionId, err });
     }
   }
   log.warn('Unclaimed response', { questionId: payload.questionId, value: payload.value });
+  return false;
 }
 
 // Channel barrel — each enabled channel self-registers on import.
@@ -127,7 +129,7 @@ async function main(): Promise<void> {
         });
       },
       onAction(questionId, selectedOption, userId) {
-        dispatchResponse({
+        return dispatchResponse({
           questionId,
           value: selectedOption,
           userId,
@@ -139,6 +141,7 @@ async function main(): Promise<void> {
           threadId: null,
         }).catch((err) => {
           log.error('Failed to handle question response', { questionId, err });
+          return false;
         });
       },
     };

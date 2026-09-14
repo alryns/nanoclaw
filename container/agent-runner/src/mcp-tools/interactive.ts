@@ -24,6 +24,20 @@ function routing() {
   return getSessionRouting();
 }
 
+/** TwynOracle fork: web cards deliberately time out sooner than other channels. */
+export const WEB_QUESTION_TIMEOUT_SECONDS = 120;
+
+export function questionTimeoutSeconds(channelType: string | null, requested: number): number {
+  return channelType === 'web' ? Math.min(requested, WEB_QUESTION_TIMEOUT_SECONDS) : requested;
+}
+
+export function questionExpiryContent(
+  channelType: string | null,
+  questionId: string,
+): Record<string, string> | undefined {
+  return channelType === 'web' ? { type: 'ask_question_expired', questionId } : undefined;
+}
+
 /**
  * The one definition of a send_card action: send_card is fire-and-forget, so
  * only a link button survives (src/channels/chat-sdk-bridge.ts). It is both
@@ -136,7 +150,8 @@ export const askUserQuestion: McpToolDefinition = {
     const title = args.title as string;
     const question = args.question as string;
     const rawOptions = args.options as unknown[];
-    const timeout = ((args.timeout as number) || 300) * 1000;
+    const requestedTimeout = (args.timeout as number) || 300;
+    const timeout = questionTimeoutSeconds(routing().channel_type, requestedTimeout) * 1000;
     if (!title || !question || !rawOptions?.length) {
       return err('title, question, and options are required');
     }
@@ -190,6 +205,18 @@ export const askUserQuestion: McpToolDefinition = {
     }
 
     log(`ask_user_question timeout: ${questionId}`);
+    // TwynOracle fork: a small outbound expiry record preserves the unchanged ask_question payload.
+    const expiry = questionExpiryContent(r.channel_type, questionId);
+    if (expiry) {
+      await writeMessageOut({
+        id: `${questionId}-expired`,
+        kind: 'chat-sdk',
+        platform_id: r.platform_id,
+        channel_type: r.channel_type,
+        thread_id: r.thread_id,
+        content: JSON.stringify(expiry),
+      });
+    }
     return err(`Question timed out after ${timeout / 1000}s`);
   },
 };

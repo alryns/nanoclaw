@@ -21,6 +21,14 @@ import { isContainerRunning } from '../container-runner.js';
 import { heartbeatPath, readOutboxFiles } from '../session-manager.js';
 import type { ChannelAdapter, ChannelDefaults, ChannelSetup, OutboundMessage } from './adapter.js';
 import { registerChannelAdapter } from './channel-registry.js';
+// TwynOracle fork: web card delivery, state and response validation.
+import {
+  addWebCardStates,
+  canAnswerWebQuestion,
+  expireWebQuestions,
+  isWebCardContent,
+  recordWebCard,
+} from './web-cards.js';
 
 const AUTH_CACHE_MS = 60_000;
 const VERIFIED_USERS_MAX = 512;
@@ -254,7 +262,7 @@ function extractText(message: OutboundMessage): string | null {
 }
 
 function rowFingerprint(row: HistoryRow): string {
-  return JSON.stringify([row.direction, row.kind, row.sender, row.text]);
+  return JSON.stringify([row.direction, row.kind, row.sender, row.text, row.card]);
 }
 
 function rowIsNewer(row: HistoryRow, highWaterMark: TranscriptHighWaterMark | null): boolean {
@@ -290,6 +298,8 @@ export function createWebAdapter(options: WebAdapterOptions = {}): ChannelAdapte
   const streams = new Map<string, Set<WebStreamClient>>();
   const pollers = new Map<string, NodeJS.Timeout>();
   const activeRefreshes = new Map<string, Promise<void>>();
+  // TwynOracle fork: state changes must bypass transcript high-water marks.
+  const forcedQuestionRows = new Map<string, Set<string>>();
   const verifiedUsers = new Map<string, VerifiedUser>();
 
   function pruneVerifiedUsers(now: number): void {
@@ -445,16 +455,37 @@ export function createWebAdapter(options: WebAdapterOptions = {}): ChannelAdapte
     client.highWaterMark = markRowSent(row, client.highWaterMark);
   }
 
-  async function refreshTranscript(platformId: string): Promise<void> {
+  function questionIdForRow(row: HistoryRow): string | undefined {
+    const card = row.card;
+    return card && typeof card === 'object' && card.type === 'question' && typeof card.questionId === 'string'
+      ? card.questionId
+      : undefined;
+  }
+
+  async function refreshTranscript(platformId: string, forceQuestionIds: readonly string[] = []): Promise<void> {
+    if (forceQuestionIds.length > 0) {
+      const forced = forcedQuestionRows.get(platformId) ?? new Set<string>();
+      forceQuestionIds.forEach((questionId) => forced.add(questionId));
+      forcedQuestionRows.set(platformId, forced);
+    }
     const existing = activeRefreshes.get(platformId);
     if (existing) return existing;
 
     const refresh = (async () => {
       const clients = streams.get(platformId);
-      if (!clients?.size) return;
+      if (!clients?.size) {
+        forcedQuestionRows.delete(platformId);
+        return;
+      }
       const session = await resolveSession(platformId);
       if (!session) return;
-      const rows = await sessionHistory({ id: session.id, limit: HISTORY_DEFAULT_LIMIT }, { caller: 'host' });
+      const expiredQuestionIds = await expireWebQuestions(session.id);
+      const forced = forcedQuestionRows.get(platformId) ?? new Set<string>();
+      forcedQuestionRows.delete(platformId);
+      expiredQuestionIds.forEach((questionId) => forced.add(questionId));
+      const rows = await addWebCardStates(
+        await sessionHistory({ id: session.id, limit: HISTORY_DEFAULT_LIMIT }, { caller: 'host' }),
+      );
 
       for (const client of clients) {
         if (client.response.writableEnded) continue;
@@ -465,7 +496,9 @@ export function createWebAdapter(options: WebAdapterOptions = {}): ChannelAdapte
         }
         const backfill = client.needsBackfill;
         for (const row of rows) {
-          if (backfill || rowIsNewer(row, client.highWaterMark)) emitTranscript(client, displayRow(row), backfill);
+          if (backfill || forced.has(questionIdForRow(row) ?? '') || rowIsNewer(row, client.highWaterMark)) {
+            emitTranscript(client, displayRow(row), backfill);
+          }
         }
         client.needsBackfill = false;
       }
@@ -475,6 +508,7 @@ export function createWebAdapter(options: WebAdapterOptions = {}): ChannelAdapte
       })
       .finally(() => {
         activeRefreshes.delete(platformId);
+        if (forcedQuestionRows.get(platformId)?.size) void refreshTranscript(platformId);
       });
     activeRefreshes.set(platformId, refresh);
     return refresh;
@@ -576,11 +610,19 @@ export function createWebAdapter(options: WebAdapterOptions = {}): ChannelAdapte
 
     async deliver(platformId, _threadId, message: OutboundMessage): Promise<string | undefined> {
       await storeWebFiles(platformId, message);
-      if (extractText(message) === null || !streams.has(platformId)) return undefined;
+      const session = await resolveSession(platformId);
+      if (session && isWebCardContent(message.content)) await recordWebCard(session.id, platformId, message.content);
+      if ((extractText(message) === null && !isWebCardContent(message.content)) || !streams.has(platformId))
+        return undefined;
       // Delivery runs after the outbound row is durable. Refreshing now sends
       // its canonical transcript row immediately; the per-client high-water
       // mark means the one-second poll cannot render it a second time.
-      await refreshTranscript(platformId);
+      const content = message.content as Record<string, unknown> | undefined;
+      const expiredQuestionId =
+        content?.type === 'ask_question_expired' && typeof content.questionId === 'string'
+          ? content.questionId
+          : undefined;
+      await refreshTranscript(platformId, expiredQuestionId ? [expiredQuestionId] : []);
       return undefined;
     },
 
@@ -602,6 +644,7 @@ export function createWebAdapter(options: WebAdapterOptions = {}): ChannelAdapte
       (url.pathname !== '/web/message' &&
         url.pathname !== '/web/stream' &&
         url.pathname !== '/web/history' &&
+        url.pathname !== '/web/question-response' &&
         url.pathname !== '/web/file' &&
         url.pathname !== '/web/vault') ||
       !req.method
@@ -715,9 +758,9 @@ export function createWebAdapter(options: WebAdapterOptions = {}): ChannelAdapte
       }
       const limit = historyLimit(url.searchParams.get('limit'));
       const before = historyBefore(url.searchParams.get('before'));
-      const rows = await sessionHistory(
-        { id: session.id, limit: limit + 1, ...(before ? { before } : {}) },
-        { caller: 'host' },
+      await expireWebQuestions(session.id);
+      const rows = await addWebCardStates(
+        await sessionHistory({ id: session.id, limit: limit + 1, ...(before ? { before } : {}) }, { caller: 'host' }),
       );
       const exhausted = rows.length <= limit;
       res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
@@ -761,6 +804,45 @@ export function createWebAdapter(options: WebAdapterOptions = {}): ChannelAdapte
         res.writeHead(202).end();
       } catch (err) {
         log.warn('Web channel rejected inbound message', { err });
+        sendStatus(res, 400);
+      }
+      return;
+    }
+
+    if (url.pathname === '/web/question-response' && req.method === 'POST') {
+      try {
+        const payload = await readJsonBody(req);
+        if (
+          !payload ||
+          typeof payload !== 'object' ||
+          !('questionId' in payload) ||
+          !('value' in payload) ||
+          typeof payload.questionId !== 'string' ||
+          typeof payload.value !== 'string'
+        ) {
+          sendStatus(res, 400);
+          return;
+        }
+        const session = await resolveSession(platformId);
+        if (!session) {
+          sendStatus(res, 401);
+          return;
+        }
+        if (!(await canAnswerWebQuestion(session.id, platformId, payload.questionId, payload.value))) {
+          sendStatus(res, 409, 'question is unavailable');
+          return;
+        }
+        // TwynOracle fork: use the same onAction → interactive response path as Slack.
+        const claimed = await config.onAction(payload.questionId, payload.value, platformId);
+        if (!claimed) {
+          sendStatus(res, 409, 'question is unavailable');
+          return;
+        }
+        // TwynOracle fork: re-emit the claimed card to every open tab immediately.
+        await refreshTranscript(platformId, [payload.questionId]);
+        res.writeHead(202).end();
+      } catch (err) {
+        log.warn('Web channel rejected question response', { err });
         sendStatus(res, 400);
       }
       return;

@@ -126,8 +126,12 @@ describe('host module lifecycle registry', () => {
     const lifecycle = await import('./host-lifecycle.js');
 
     expect(lifecycle.getHostShutdownCallbacks()).toHaveLength(0);
+    // TwynOracle fork: approvals' import graph reaches the gateway providers, whose twyn lifecycle
+    // registers its own shutdown callback. Load it first so this proof counts approvals alone.
+    await import('./gateway-providers/twyn-lifecycle.js');
+    const before = lifecycle.getHostShutdownCallbacks().length;
     await import('./modules/approvals/index.js');
-    expect(lifecycle.getHostShutdownCallbacks()).toHaveLength(1);
+    expect(lifecycle.getHostShutdownCallbacks()).toHaveLength(before + 1);
   });
 });
 

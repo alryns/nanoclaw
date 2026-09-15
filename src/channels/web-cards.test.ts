@@ -12,6 +12,7 @@ import {
   expireWebQuestions,
   markWebQuestionAnswered,
   recordWebCard,
+  stopWebQuestions,
   WEB_CARD_EXPIRY_MS,
   WEB_QUESTION_TIMEOUT_MS,
 } from './web-cards.js';
@@ -124,6 +125,27 @@ describe('web question cards', () => {
     expect(await getPendingQuestion('q-1')).toBeUndefined();
     await expect(addWebCardStates([{ card: { type: 'question', questionId: 'q-1' } }])).resolves.toEqual([
       { card: { type: 'question', questionId: 'q-1', state: 'timed_out', selectedLabel: undefined } },
+    ]);
+  });
+
+  it('ends pending cards when their turn is stopped', async () => {
+    await recordWebCard('session-1', 'web:member-1', card);
+    await createPendingQuestion({
+      question_id: 'q-1',
+      session_id: 'session-1',
+      message_out_id: 'out-1',
+      platform_id: 'web:member-1',
+      channel_type: 'web',
+      thread_id: null,
+      title: 'Choose',
+      options: card.options,
+      created_at: new Date().toISOString(),
+    });
+
+    await expect(stopWebQuestions('session-1')).resolves.toEqual(['q-1']);
+    expect(await getPendingQuestion('q-1')).toBeUndefined();
+    await expect(addWebCardStates([{ card: { type: 'question', questionId: 'q-1' } }])).resolves.toEqual([
+      { card: { type: 'question', questionId: 'q-1', state: 'stopped', selectedLabel: undefined } },
     ]);
   });
 });

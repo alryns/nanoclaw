@@ -29,6 +29,8 @@ import {
 } from './formatter.js';
 import { stripHarnessTagArtifacts } from './harness-tag-strip.js';
 import { clearTurnStatus } from './twyn-status.js';
+import { clearActiveTurn, writeActiveTurn } from './turn-activity.js';
+import { stopRequest } from './turn-stop.js';
 import { isUploadTraceCommand, uploadTrace } from './upload-trace.js';
 import type { AgentProvider, AgentQuery, ProviderEvent, ProviderExchange } from './providers/types.js';
 
@@ -37,6 +39,8 @@ const ACTIVE_POLL_INTERVAL_MS = 500;
 
 /** Consecutive driver-classified failures before a fresh runner is required. */
 const MAILBOX_FAILURE_STREAK_EXIT = 10;
+// TwynOracle fork: how long after a result the first event may still start a pushed follow-up's turn.
+const FOLLOW_UP_REARM_MS = 30_000;
 
 function log(msg: string): void {
   console.error(`[poll-loop] ${msg}`);
@@ -104,13 +108,23 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
   // Clear leftover 'processing' acks from a previous crashed container.
   // This lets the new container re-process those messages.
   clearStaleProcessingAcks();
+  // TwynOracle fork: a prior container can die before processQuery's finally.
+  clearActiveTurn();
 
   let pollCount = 0;
   let isFirstPoll = true;
   while (true) {
     if (config.signal?.aborted) return;
-    // Skip system messages — they're responses for MCP tools (e.g., ask_user_question)
-    const messages = getPendingMessages(isFirstPoll).filter((m) => m.kind !== 'system');
+    const pending = getPendingMessages(isFirstPoll);
+    const stops = pending.filter((message) => stopRequest(message));
+    const cancelledInputIds = new Set<string>();
+    for (const message of stops) {
+      for (const inputId of await completeStopCommand(message)) cancelledInputIds.add(inputId);
+    }
+    // Skip system messages — they're responses for MCP tools (e.g., ask_user_question).
+    // TwynOracle fork: a stop command above is consumed without waking a query,
+    // and can cancel a cold-start row that was read in the same poll batch.
+    const messages = pending.filter((m) => m.kind !== 'system' && !cancelledInputIds.has(m.id));
     isFirstPoll = false;
     pollCount++;
 
@@ -141,6 +155,9 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     markProcessing(ids);
 
     const routing = extractRouting(messages);
+    // TwynOracle fork: publish the stop target as soon as the runner claims
+    // the batch. It stays present through quiet tool calls until query cleanup.
+    writeActiveTurn(routing);
 
     // Command handling: the host router gates filtered and unauthorized
     // admin commands before they reach the container. The only command
@@ -189,6 +206,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     if (normalMessages.length === 0) {
       const remainingIds = ids.filter((id) => !commandIds.includes(id));
       if (remainingIds.length > 0) markCompleted(remainingIds);
+      clearActiveTurn();
       log(`All ${messages.length} message(s) were commands, skipping query`);
       continue;
     }
@@ -212,6 +230,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     // MODULE-HOOK:scheduling-pre-task:end
 
     if (keep.length === 0) {
+      clearActiveTurn();
       log(`All ${normalMessages.length} non-command message(s) gated by script, skipping query`);
       continue;
     }
@@ -275,6 +294,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
       // Write error response so the user knows something went wrong
       await writeMessageOut({
         id: generateId(),
+        in_reply_to: routing.inReplyTo,
         kind: 'chat',
         platform_id: routing.platformId,
         channel_type: routing.channelType,
@@ -357,6 +377,15 @@ export async function processQuery(
 ): Promise<QueryResult> {
   let queryContinuation: string | undefined;
   let done = false;
+  // TwynOracle fork: active-turn record lifecycle inside one open query. The outer loop wrote the
+  // record for the initial batch. A follow-up pushed while a turn is live may be answered by that
+  // turn's result or by a turn of its own after it; SDK events only flow while a turn runs, so the
+  // first event after that result re-arms the record. The re-arm expires: a follow-up's own turn
+  // streams within seconds, while an SDK event between turns (rate limit, compaction) must not mark
+  // an idle agent as running.
+  let turnActive = true;
+  let pushedDuringTurn = false;
+  let rearmUntilMs = 0;
   let unwrappedNudged = false;
   // Once-per-turn guard for the task-run "<message> block was not delivered"
   // nudge — mirrors unwrappedNudged for chat turns.
@@ -416,6 +445,17 @@ export async function processQuery(
     void (async () => {
       try {
         const pending = getPendingMessages();
+
+        const stops = pending.filter((message) => stopRequest(message));
+        if (stops.length > 0) {
+          // TwynOracle fork: stop is a host-to-runner command. Write its
+          // deterministic notice before acknowledging it, then interrupt the
+          // live SDK query. The fence lives on the host and drops late output.
+          endedForCommand = true;
+          for (const message of stops) await completeStopCommand(message);
+          query.abort();
+          return;
+        }
 
         // Slash commands need a fresh query: /clear resets the SDK's
         // resume id (fixed at sdkQuery() time); admin/passthrough commands
@@ -483,6 +523,11 @@ export async function processQuery(
         const keptIds = keep.map((m) => m.id);
         const prompt = formatMessages(keep);
         log(`Pushing ${keep.length} follow-up message(s) into active query`);
+        // TwynOracle fork: a follow-up starts or joins a turn under the query's routing, which is the
+        // turn id its output carries.
+        if (turnActive) pushedDuringTurn = true;
+        writeActiveTurn(routing);
+        turnActive = true;
         unwrappedNudged = false;
         taskBlockNudged = false;
         query.push(prompt);
@@ -522,6 +567,11 @@ export async function processQuery(
 
   try {
     for await (const event of query.events) {
+      if (rearmUntilMs > Date.now() && event.type !== 'result') {
+        writeActiveTurn(routing);
+        turnActive = true;
+        rearmUntilMs = 0;
+      }
       handleEvent(event, routing);
       touchHeartbeat();
 
@@ -555,6 +605,7 @@ export async function processQuery(
         // (send_message) mid-turn, or the message may not need a response
         // at all — either way the turn is finished.
         markCompleted(initialBatchIds);
+        let retryPushed = false;
         if (event.text) {
           const { sent, hasUnwrapped, taskBlocks, resultBlocks } = await dispatchResultText(event.text, routing, {
             midTurnSent,
@@ -599,6 +650,7 @@ export async function processQuery(
             // coaxes a redundant second message (live-observed). It stays in
             // the scratchpad log.
             const willRetryWrapping = hasUnwrapped && !unwrappedNudged;
+            retryPushed = willRetryWrapping || willRetryTaskBlocks;
             notifyExchangeComplete(onExchangeComplete, {
               prompt: archivePrompts[0] ?? initialPrompt,
               result: event.text,
@@ -641,6 +693,14 @@ export async function processQuery(
         midTurnSent = 0;
         turnStartSeq = maxOutboundSeq();
         midTurnTail = '';
+        // TwynOracle fork: the query stays open for follow-ups after a result, so the turn ends here,
+        // not at query exit. A nudge retry answers the same prompt and keeps the turn running.
+        if (!retryPushed) {
+          clearActiveTurn();
+          turnActive = false;
+          rearmUntilMs = pushedDuringTurn ? Date.now() + FOLLOW_UP_REARM_MS : 0;
+          pushedDuringTurn = false;
+        }
       }
     }
   } catch (err) {
@@ -655,6 +715,7 @@ export async function processQuery(
   } finally {
     // TwynOracle fork knob: clear a status left by an interrupted active turn.
     clearTurnStatus();
+    clearActiveTurn();
     done = true;
     clearInterval(pollHandle);
   }
@@ -691,6 +752,24 @@ function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
       log(`Progress: ${event.message}`);
       break;
   }
+}
+
+/** TwynOracle fork: ack the durable stop command and cancel its cold-start rows. */
+export async function completeStopCommand(message: MessageInRow): Promise<string[]> {
+  const stop = stopRequest(message);
+  if (!stop) return [];
+  if (!stop.noticeAlreadyWritten) {
+    await writeMessageOut({
+      id: stop.noticeId,
+      kind: 'chat',
+      platform_id: stop.platformId,
+      channel_type: stop.channelType,
+      thread_id: stop.threadId,
+      content: JSON.stringify({ type: 'twyn_turn_stopped', text: 'Stopped' }),
+    });
+  }
+  markCompleted([...stop.cancelInputIds, message.id]);
+  return stop.cancelInputIds;
 }
 
 /**
@@ -949,7 +1028,6 @@ function wasWrittenInSeqWindow(dest: DestinationEntry, body: string, afterSeq: n
   try {
     const platformId = dest.type === 'channel' ? dest.platformId! : dest.agentGroupId!;
     const channelType = dest.type === 'channel' ? dest.channelType! : 'agent';
-    const content = JSON.stringify({ text: body });
     return getUndeliveredMessages().some(
       (message) =>
         (message.seq ?? 0) > afterSeq &&
@@ -957,7 +1035,7 @@ function wasWrittenInSeqWindow(dest: DestinationEntry, body: string, afterSeq: n
         message.kind === 'chat' &&
         message.platform_id === platformId &&
         message.channel_type === channelType &&
-        message.content === content,
+        outboundText(message.content) === body,
     );
   } catch (err) {
     // The guard is an anti-duplication refinement; if the lookup itself
@@ -966,6 +1044,20 @@ function wasWrittenInSeqWindow(dest: DestinationEntry, body: string, afterSeq: n
     log(`Echo-guard lookup failed: ${err instanceof Error ? err.message : String(err)}`);
     return false;
   }
+}
+
+/** Text equality for the echo guard ignores display-inert Twyn metadata. */
+function outboundText(content: string): string | null {
+  try {
+    const parsed: unknown = JSON.parse(content);
+    if (parsed && typeof parsed === 'object') {
+      const text = (parsed as Record<string, unknown>).text;
+      return typeof text === 'string' ? text : null;
+    }
+  } catch {
+    // Non-JSON output cannot be an equivalent chat message body.
+  }
+  return null;
 }
 
 export async function dispatchResultText(
@@ -1144,12 +1236,14 @@ async function sendToDestination(dest: DestinationEntry, body: string, routing: 
   const destRouting = resolveDestinationThread(channelType, platformId);
   await writeMessageOut({
     id: generateId(),
+    // Keep target-local reply correlation for a shared session, and carry the
+    // active source turn separately for TwynOracle's host delivery fence.
     in_reply_to: destRouting?.inReplyTo ?? routing.inReplyTo,
     kind: 'chat',
     platform_id: platformId,
     channel_type: channelType,
     thread_id: destRouting?.threadId ?? null,
-    content: JSON.stringify({ text: body }),
+    content: JSON.stringify({ text: body, twynTurnInputId: routing.inReplyTo }),
   });
 }
 

@@ -16,6 +16,7 @@ import { getAgentGroup } from '../../db/agent-groups.js';
 import { getSession } from '../../db/sessions.js';
 import { withExistingMailboxSession } from '../../session-manager.js';
 import { formatLocalStamp } from '../../timezone.js';
+import { webHistoryControls } from '../../channels/web-turn-controls.js';
 import type { CallerContext } from '../../cli/frame.js';
 
 export const HISTORY_DEFAULT_LIMIT = 50;
@@ -31,6 +32,8 @@ export interface HistoryRow {
   text: string;
   /** Outbound message id, used for outbox files and stable transcript card updates. */
   messageId?: string;
+  /** Web-only state, set only for a replaced member message. */
+  replaced?: boolean;
   /** Declared outbound outbox filenames, when present. */
   files?: string[];
   /** TwynOracle fork: structured web-card data, never raw HTML. */
@@ -92,8 +95,11 @@ function parseText(raw: string): {
       sender: typeof parsed.sender === 'string' ? parsed.sender : null,
       files,
       card,
-      // TwynOracle fork: bookkeeping rows, not messages (runner expiry, a card click's routed answer).
-      hidden: parsed.type === 'ask_question_expired' || parsed.type === 'question_response',
+      // TwynOracle fork: bookkeeping rows, not messages (runner expiry, a card click's routed answer, a stop command).
+      hidden:
+        parsed.type === 'ask_question_expired' ||
+        parsed.type === 'question_response' ||
+        parsed.type === 'twyn_stop_turn',
     };
   } catch {
     return { text: raw, sender: null };
@@ -124,6 +130,9 @@ export async function sessionHistory(args: Record<string, unknown>, ctx: CallerC
   const agentName = (await getAgentGroup(session.agent_group_id))?.name ?? 'agent';
   const rows: HistoryRow[] = [];
 
+  // TwynOracle fork: private outbox metadata supplies stop/replacement state.
+  const webControls = await webHistoryControls(session);
+
   const history = await withExistingMailboxSession(session.agent_group_id, session.id, (mailbox) => ({
     // The mailbox history API is newest-first only. A cutoff must therefore
     // read the complete transcript before it can select the preceding page.
@@ -133,11 +142,22 @@ export async function sessionHistory(args: Record<string, unknown>, ctx: CallerC
 
   if (history) {
     for (const r of history.inbound) {
+      const metadata = webControls.takeInbound(r.timestamp, r.content);
       const { text, sender, hidden } = parseText(r.content);
       if (hidden) continue;
-      rows.push({ timestamp: r.timestamp, direction: 'in', kind: r.kind, sender: sender ?? '', text });
+      rows.push({
+        timestamp: r.timestamp,
+        direction: 'in',
+        kind: r.kind,
+        sender: sender ?? '',
+        text,
+        ...(metadata ? { messageId: metadata.id } : {}),
+        ...(metadata?.replaced ? { replaced: true } : {}),
+      });
     }
     for (const r of history.outbound) {
+      const metadata = webControls.takeOutbound(r.timestamp, r.content);
+      if (metadata && (await webControls.isStoppedOutbound(metadata))) continue;
       const { text, files, card, hidden } = parseText(r.content);
       if (hidden) continue;
       rows.push({
@@ -146,7 +166,7 @@ export async function sessionHistory(args: Record<string, unknown>, ctx: CallerC
         kind: r.kind,
         sender: agentName,
         text,
-        ...(typeof r.id === 'string' && (files || card) ? { messageId: r.id } : {}),
+        ...(metadata && (files || card) ? { messageId: metadata.id } : {}),
         ...(files ? { files } : {}),
         ...(card ? { card } : {}),
       });

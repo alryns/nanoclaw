@@ -113,6 +113,24 @@ export async function expireWebQuestion(questionIdValue: string): Promise<void> 
   });
 }
 
+/** TwynOracle fork: a stopped turn can no longer consume a card response. */
+export async function stopWebQuestions(sessionId: string): Promise<string[]> {
+  return getDb().transaction(async () => {
+    const pending = await getDb().all<{ question_id: string }>(
+      "SELECT question_id FROM web_question_cards WHERE session_id = ? AND state = 'pending'",
+      sessionId,
+    );
+    if (pending.length === 0) return [];
+    const ids = pending.map((row) => row.question_id);
+    await getDb().run(
+      `UPDATE web_question_cards SET state = 'stopped' WHERE question_id IN (${ids.map(() => '?').join(', ')})`,
+      ...ids,
+    );
+    await getDb().run(`DELETE FROM pending_questions WHERE question_id IN (${ids.map(() => '?').join(', ')})`, ...ids);
+    return ids;
+  });
+}
+
 export async function canAnswerWebQuestion(
   sessionId: string,
   platformId: string,

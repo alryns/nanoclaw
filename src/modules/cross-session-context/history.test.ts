@@ -4,6 +4,7 @@
  * scope filter, so cross-group agents must get "session not found" here).
  */
 import fs from 'fs';
+import Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../../config.js', async () => {
@@ -11,7 +12,9 @@ vi.mock('../../config.js', async () => {
   return { ...actual, DATA_DIR: '/tmp/nanoclaw-test-cross-session-history' };
 });
 
-import { closeDb, createAgentGroup, initTestDb, runMigrations } from '../../db/index.js';
+import { closeDb, createAgentGroup, getDb, initTestDb, runMigrations } from '../../db/index.js';
+import { reserveWebMessageReplacement } from '../../channels/web-turn-controls.js';
+import { outboundDbPath } from '../../mailbox/sqlite/paths.js';
 import { createSession } from '../../db/sessions.js';
 import { initSessionFolder, writeOutboundDirect, writeSessionMessage } from '../../session-manager.js';
 import type { CallerContext } from '../../cli/frame.js';
@@ -75,7 +78,7 @@ afterEach(async () => {
 
 describe('sessionHistory', () => {
   // TwynOracle fork: a card click is stored as a system row; it must not render as an empty message.
-  it('omits routed question responses from the transcript', async () => {
+  it('omits routed question responses and stop commands from the transcript', async () => {
     await writeInbound('in-1', '2026-08-02T10:00:00.000Z', 'hello');
     await writeSessionMessage(AG, SESS, {
       id: 'qr-1',
@@ -85,6 +88,16 @@ describe('sessionHistory', () => {
       channelType: 'web',
       threadId: null,
       content: JSON.stringify({ type: 'question_response', questionId: 'q-1', selectedOption: 'Blue', userId: '' }),
+    });
+
+    await writeSessionMessage(AG, SESS, {
+      id: 'web-stop-1',
+      kind: 'system',
+      timestamp: '2026-08-02T10:02:00.000Z',
+      platformId: 'web:u1',
+      channelType: 'web',
+      threadId: null,
+      content: JSON.stringify({ type: 'twyn_stop_turn', noticeId: 'n-1' }),
     });
 
     const rows = await sessionHistory({ id: SESS }, HOST);
@@ -113,6 +126,7 @@ describe('sessionHistory', () => {
       kind: 'chat',
       sender: 'Alex',
       text: 'hello there',
+      messageId: 'in-1',
     });
     expect(rows[1].text).toBe('second message');
     expect(rows[2].direction).toBe('out');
@@ -141,6 +155,58 @@ describe('sessionHistory', () => {
         files: ['report.html', 'data.csv'],
       }),
     ]);
+  });
+
+  it('keeps replaced web text readable and marks it after reload', async () => {
+    await writeInbound('web-original', '2026-08-01T10:00:00.000Z', 'original wording', 'web');
+    await reserveWebMessageReplacement({ id: SESS, agent_group_id: AG }, 'web-original', 'web-corrected');
+
+    await expect(sessionHistory({ id: SESS }, HOST)).resolves.toEqual([
+      expect.objectContaining({
+        direction: 'in',
+        messageId: 'web-original',
+        text: 'original wording',
+        replaced: true,
+      }),
+    ]);
+  });
+
+  it('hides post-stop output for the stopped turn but keeps the next turn', async () => {
+    await writeInbound('stopped-turn', '2026-08-01T10:00:00.000Z', 'stop this');
+    await writeInbound('next-turn', '2026-08-01T10:01:00.000Z', 'continue');
+    const db = new Database(outboundDbPath(AG, SESS));
+    db.prepare(
+      `INSERT INTO messages_out
+         (id, timestamp, kind, platform_id, channel_type, content, in_reply_to)
+       VALUES (?, ?, 'chat', 'D1', 'slack', ?, ?)`,
+    ).run(
+      'late-stopped',
+      '2026-08-01T10:03:00.000Z',
+      JSON.stringify({ text: 'late output', twynTurnInputId: 'stopped-turn' }),
+      'older-destination-input',
+    );
+    db.prepare(
+      `INSERT INTO messages_out
+         (id, timestamp, kind, platform_id, channel_type, content, in_reply_to)
+       VALUES (?, ?, 'chat', 'D1', 'slack', ?, ?)`,
+    ).run(
+      'next-output',
+      '2026-08-01T10:04:00.000Z',
+      JSON.stringify({ text: 'next output', twynTurnInputId: 'next-turn' }),
+      'older-destination-input',
+    );
+    db.close();
+    await getDb().run(
+      'INSERT INTO web_stopped_turns (session_id, in_reply_to, stopped_at, outbound_sequence) VALUES (?, ?, ?, ?)',
+      SESS,
+      'stopped-turn',
+      '2026-08-01T10:02:00.000Z',
+      0,
+    );
+
+    const rows = await sessionHistory({ id: SESS }, HOST);
+    expect(rows.map((entry) => entry.text)).not.toContain('late output');
+    expect(rows.map((entry) => entry.text)).toContain('next output');
   });
 
   it('formatHistoryLines renders pipe lines with localized stamps and capped cells', async () => {

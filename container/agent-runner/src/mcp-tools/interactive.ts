@@ -6,10 +6,12 @@
  */
 import { AjvJsonSchemaValidator } from '@modelcontextprotocol/sdk/validation/ajv';
 
-import { findQuestionResponse, markCompleted } from '../db/messages-in.js';
+import { findQuestionResponse, getPendingMessages, markCompleted } from '../db/messages-in.js';
 import { writeMessageOut } from '../db/messages-out.js';
 import { getSessionRouting } from '../db/session-routing.js';
+import { getCurrentInReplyTo } from '../db/session-state.js';
 import { registerTools } from './server.js';
+import { stopRequest } from '../turn-stop.js';
 import type { McpToolDefinition } from './types.js';
 
 function log(msg: string): void {
@@ -172,6 +174,7 @@ export const askUserQuestion: McpToolDefinition = {
     // Write question card to outbound.db
     await writeMessageOut({
       id: questionId,
+      in_reply_to: getCurrentInReplyTo(),
       kind: 'chat-sdk',
       platform_id: r.platform_id,
       channel_type: r.channel_type,
@@ -190,6 +193,10 @@ export const askUserQuestion: McpToolDefinition = {
     // Poll for response in inbound.db (host writes the response there)
     const deadline = Date.now() + timeout;
     while (Date.now() < deadline) {
+      if (getPendingMessages().some((message) => stopRequest(message))) {
+        log(`ask_user_question stopped: ${questionId}`);
+        return err('Question stopped');
+      }
       const response = findQuestionResponse(questionId);
 
       if (response) {
@@ -210,6 +217,7 @@ export const askUserQuestion: McpToolDefinition = {
     if (expiry) {
       await writeMessageOut({
         id: `${questionId}-expired`,
+        in_reply_to: getCurrentInReplyTo(),
         kind: 'chat-sdk',
         platform_id: r.platform_id,
         channel_type: r.channel_type,

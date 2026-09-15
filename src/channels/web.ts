@@ -17,10 +17,18 @@ import { getMessagingGroupAgents, getMessagingGroupByPlatform } from '../db/mess
 import { findSessionByAgentGroup } from '../db/sessions.js';
 import { log } from '../log.js';
 import { HISTORY_DEFAULT_LIMIT, sessionHistory, type HistoryRow } from '../modules/cross-session-context/index.js';
-import { isContainerRunning } from '../container-runner.js';
 import { heartbeatPath, readOutboxFiles } from '../session-manager.js';
 import type { ChannelAdapter, ChannelDefaults, ChannelSetup, OutboundMessage } from './adapter.js';
 import { registerChannelAdapter } from './channel-registry.js';
+// TwynOracle fork: web stop/edit controls share the session mailbox fence.
+import {
+  canReplaceLatestWebMessage,
+  isLatestWebMessage,
+  hasActiveWebTurn,
+  releaseWebMessageReplacement,
+  requestWebTurnStop,
+  reserveWebMessageReplacement,
+} from './web-turn-controls.js';
 // TwynOracle fork: web card delivery, state and response validation.
 import {
   addWebCardStates,
@@ -34,6 +42,7 @@ const AUTH_CACHE_MS = 60_000;
 const VERIFIED_USERS_MAX = 512;
 const HEARTBEAT_MS = 25_000;
 const WORKING_EVERY_TICKS = 4;
+const WORKING_REFRESH_MS = 3_500;
 const TRANSCRIPT_POLL_MS = 1_000;
 const WEB_TOOLS = new Set(['twyn-ask', 'twyn-query', 'twyn-portal-nav', 'twyn-repo-ask']);
 const WEB_MODES = new Set(['standard', 'simple', 'eli5', 'showme']);
@@ -75,6 +84,8 @@ export interface WebAdapterOptions {
   port?: number;
   pollIntervalMs?: number;
   tokenCacheMax?: number;
+  /** Test-only override for the runner interrupt fallback. */
+  stopGraceMs?: number;
 }
 
 function platformIdFor(userId: string): string {
@@ -294,10 +305,12 @@ export function createWebAdapter(options: WebAdapterOptions = {}): ChannelAdapte
   const port = options.port ?? TWYN_WEB_PORT;
   const pollIntervalMs = options.pollIntervalMs ?? TRANSCRIPT_POLL_MS;
   const tokenCacheMax = options.tokenCacheMax ?? VERIFIED_USERS_MAX;
+  const stopGraceMs = options.stopGraceMs;
   let server: http.Server | null = null;
   const streams = new Map<string, Set<WebStreamClient>>();
   const pollers = new Map<string, NodeJS.Timeout>();
   const activeRefreshes = new Map<string, Promise<void>>();
+  const reportedWorking = new Map<string, { status: string | null; at: number }>();
   // TwynOracle fork: state changes must bypass transcript high-water marks.
   const forcedQuestionRows = new Map<string, Set<string>>();
   const verifiedUsers = new Map<string, VerifiedUser>();
@@ -421,29 +434,57 @@ export function createWebAdapter(options: WebAdapterOptions = {}): ChannelAdapte
     }
   }
 
-  function writeWorking(platformId: string, status: string | null): void {
+  function writeWorking(platformId: string, status: string | null, running = true): void {
     const clients = streams.get(platformId);
     if (!clients) return;
-    const payload = JSON.stringify({ at: new Date().toISOString(), status });
+    const now = Date.now();
+    const previous = reportedWorking.get(platformId);
+    if (!running) {
+      // Idle is a state transition, never a periodic heartbeat.
+      if (!previous) return;
+      reportedWorking.delete(platformId);
+    } else {
+      // The single state publisher may be triggered by either the transcript
+      // poll or typing refresh. Coalesce identical refreshes at their offset.
+      if (previous?.status === status && now - previous.at < WORKING_REFRESH_MS) return;
+      reportedWorking.set(platformId, { status, at: now });
+    }
+    const payload = JSON.stringify({ at: new Date(now).toISOString(), status, running });
     for (const client of clients) {
       if (!client.response.writableEnded) client.response.write(`event: working\ndata: ${payload}\n\n`);
     }
   }
 
-  async function runnerStatusFor(platformId: string): Promise<string | null> {
+  async function sendInitialWorkingState(platformId: string, client: WebStreamClient): Promise<void> {
     try {
       const session = await resolveSession(platformId);
-      return session ? readRunnerStatus(session.agent_group_id, session.id) : null;
-    } catch {
-      return null;
+      if (!session || client.response.writableEnded || !(await hasActiveWebTurn(session))) return;
+      const status = readRunnerStatus(session.agent_group_id, session.id);
+      // No tab has been told yet: publish to all of them, which also records the state so the end
+      // of the turn still publishes its single running:false.
+      if (!reportedWorking.has(platformId)) {
+        writeWorking(platformId, status, true);
+        return;
+      }
+      // Other tabs already know; the refresh coalescing would hide it from this one for 3.5 s.
+      const payload = JSON.stringify({ at: new Date().toISOString(), status, running: true });
+      client.response.write(`event: working\ndata: ${payload}\n\n`);
+    } catch (err) {
+      log.warn('Web channel initial working state failed', { err, platformId });
     }
   }
 
-  async function emitWorkingWhileRunning(platformId: string): Promise<void> {
+  /** TwynOracle fork: the only publisher of browser running state. */
+  async function emitWorkingState(platformId: string): Promise<void> {
     try {
       const session = await resolveSession(platformId);
-      if (!session || !isContainerRunning(session.id)) return;
-      writeWorking(platformId, readRunnerStatus(session.agent_group_id, session.id));
+      const running = Boolean(session && (await hasActiveWebTurn(session)));
+      if (!running) {
+        writeWorking(platformId, null, false);
+        return;
+      }
+      if (!session) return;
+      writeWorking(platformId, readRunnerStatus(session.agent_group_id, session.id), true);
     } catch (err) {
       log.warn('Web channel working probe failed', { err, platformId });
     }
@@ -541,25 +582,28 @@ export function createWebAdapter(options: WebAdapterOptions = {}): ChannelAdapte
     clients.add(client);
 
     if (!pollers.has(platformId)) {
-      // The typing module only fires while the agent's heartbeat file is fresh, which drops
-      // out during a cold container start and inside long generations. A container that exists
-      // for the member's session is the honest "working" signal, so emit it every 4 s as well.
+      // The typing module is an opportunistic refresh. Polling the same
+      // activity predicate also covers a live query whose tool call is quiet.
       let ticks = 0;
       const poller = setInterval(() => {
         void refreshTranscript(platformId);
         ticks += 1;
-        if (ticks % WORKING_EVERY_TICKS === 0) void emitWorkingWhileRunning(platformId);
+        if (ticks % WORKING_EVERY_TICKS === 0) void emitWorkingState(platformId);
       }, pollIntervalMs);
       poller.unref();
       pollers.set(platformId, poller);
     }
     void refreshTranscript(platformId);
+    // TwynOracle fork: a tab that connects or reloads mid-turn learns it at once, not on the next
+    // working tick, so Stop is offered immediately.
+    void sendInitialWorkingState(platformId, client);
 
     response.on('close', () => {
       clearInterval(heartbeat);
       clients?.delete(client);
       if (clients?.size === 0) {
         streams.delete(platformId);
+        reportedWorking.delete(platformId);
         stopPoller(platformId);
       }
     });
@@ -594,6 +638,7 @@ export function createWebAdapter(options: WebAdapterOptions = {}): ChannelAdapte
         }
       }
       streams.clear();
+      reportedWorking.clear();
       if (server) {
         // Idle keep-alive sockets would otherwise outlive the listener and fail their next
         // request on reuse (seen in the suite: per-test servers on one port, "other side closed").
@@ -626,15 +671,10 @@ export function createWebAdapter(options: WebAdapterOptions = {}): ChannelAdapte
       return undefined;
     },
 
-    // NanoClaw's typing module calls this every few seconds while the agent's heartbeat is
-    // fresh (immediately on inbound, paused briefly after each delivery). Browsers have no
-    // typing indicator, so each call becomes a named SSE event the page turns into a live
-    // "working" state; the page lets it expire when the calls stop.
-    // Without a status of its own the call carries the runner's phase (the .status file), so
-    // the page does not flicker between the phase text and the generic line as the two 4 s
-    // sources (this hook and emitWorkingWhileRunning) interleave.
-    async setTyping(platformId, _threadId, status): Promise<void> {
-      writeWorking(platformId, status ?? (await runnerStatusFor(platformId)));
+    // Typing is only a refresh trigger. The SSE state itself is emitted by
+    // emitWorkingState, which uses the same predicate as POST /web/stop.
+    async setTyping(platformId): Promise<void> {
+      await emitWorkingState(platformId);
     },
   };
 
@@ -642,6 +682,7 @@ export function createWebAdapter(options: WebAdapterOptions = {}): ChannelAdapte
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? '127.0.0.1'}`);
     if (
       (url.pathname !== '/web/message' &&
+        url.pathname !== '/web/stop' &&
         url.pathname !== '/web/stream' &&
         url.pathname !== '/web/history' &&
         url.pathname !== '/web/question-response' &&
@@ -768,6 +809,23 @@ export function createWebAdapter(options: WebAdapterOptions = {}): ChannelAdapte
       return;
     }
 
+    if (url.pathname === '/web/stop' && req.method === 'POST') {
+      const session = await resolveSession(platformId);
+      if (!session) {
+        sendStatus(res, 401);
+        return;
+      }
+      const result = await requestWebTurnStop(session, {
+        ...(stopGraceMs === undefined ? {} : { graceMs: stopGraceMs }),
+      });
+      // TwynOracle fork: stopped cards retain their transcript row, so force
+      // every open tab to receive its new terminal state immediately.
+      if (result.stoppedQuestionIds?.length) await refreshTranscript(platformId, result.stoppedQuestionIds);
+      res.writeHead(202, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+      res.end(JSON.stringify(result));
+      return;
+    }
+
     if (url.pathname === '/web/message' && req.method === 'POST') {
       try {
         const payload = await readJsonBody(req);
@@ -790,17 +848,63 @@ export function createWebAdapter(options: WebAdapterOptions = {}): ChannelAdapte
           sendStatus(res, 400, 'invalid explore');
           return;
         }
+        const replaceMessageId = 'replaceMessageId' in payload ? payload.replaceMessageId : undefined;
+        if (replaceMessageId !== undefined && (typeof replaceMessageId !== 'string' || !replaceMessageId)) {
+          sendStatus(res, 400, 'invalid replacement message');
+          return;
+        }
         const text =
           tool === undefined && mode === 'standard' && explore !== false
             ? payload.text
             : `[twynoracle${tool ? ` tool=${tool}` : ''}${mode !== 'standard' ? ` mode=${mode}` : ''}${explore === false ? ' explore=off' : ''}]\n${payload.text}`;
-        await config.onInbound(platformId, null, {
-          id: `web-${Date.now()}-${randomUUID()}`,
-          kind: 'chat',
-          timestamp: new Date().toISOString(),
-          isGroup: false,
-          content: { text, sender: 'web', senderId: platformId },
-        });
+        const eventId = `web-${Date.now()}-${randomUUID()}`;
+        let replacementMessageId: string | undefined;
+        if (replaceMessageId) {
+          const session = await resolveSession(platformId);
+          if (!session) {
+            sendStatus(res, 401);
+            return;
+          }
+          if (!(await canReplaceLatestWebMessage(session, platformId, replaceMessageId))) {
+            sendStatus(res, 409, 'message is unavailable for editing');
+            return;
+          }
+          replacementMessageId = `${eventId}:${session.agent_group_id}`;
+          if (!(await reserveWebMessageReplacement(session, replaceMessageId, replacementMessageId))) {
+            sendStatus(res, 409, 'message is unavailable for editing');
+            return;
+          }
+          // TwynOracle fork: a message from another tab or Slack may have landed between the check
+          // and the reservation; only the latest message may be replaced.
+          if (!isLatestWebMessage(session, platformId, replaceMessageId)) {
+            await releaseWebMessageReplacement(replaceMessageId, replacementMessageId);
+            sendStatus(res, 409, 'message is unavailable for editing');
+            return;
+          }
+          try {
+            await requestWebTurnStop(session, {
+              ...(stopGraceMs === undefined ? {} : { graceMs: stopGraceMs }),
+            });
+          } catch (error) {
+            // A reservation left behind would lock the message out of editing for good.
+            await releaseWebMessageReplacement(replaceMessageId, replacementMessageId);
+            throw error;
+          }
+        }
+        try {
+          await config.onInbound(platformId, null, {
+            id: eventId,
+            kind: 'chat',
+            timestamp: new Date().toISOString(),
+            isGroup: false,
+            content: { text, sender: 'web', senderId: platformId },
+          });
+        } catch (error) {
+          if (replaceMessageId && replacementMessageId) {
+            await releaseWebMessageReplacement(replaceMessageId, replacementMessageId);
+          }
+          throw error;
+        }
         res.writeHead(202).end();
       } catch (err) {
         log.warn('Web channel rejected inbound message', { err });

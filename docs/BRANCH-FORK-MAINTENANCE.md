@@ -117,3 +117,25 @@ Registry branches add their own deps on top of upstream's. Skill `nc:dep` direct
    `writeTurnStatus` line at the top of `createPreCompactHook`.
 10. `container/agent-runner/src/poll-loop.ts` clears the fork-owned turn-status file when an active query
     exits unexpectedly. On rebase, retain the import and one cleanup call in `processQuery`'s `finally`.
+11. Web question cards (TwynOracle #96). `src/channels/adapter.ts` lets `onAction` return
+    `Promise<boolean>` and `src/index.ts` `dispatchResponse` returns whether a handler claimed the
+    response, so the web answer route can reject duplicate clicks; Slack ignores the value.
+    `src/modules/interactive/index.ts` claims the pending question and writes the fork-owned web card
+    state in one central-DB transaction (imports `src/channels/web-cards.ts`).
+    `modules/cross-session-context/history.ts` returns card rows and hides bookkeeping rows
+    (`ask_question_expired`, `question_response`, `twyn_stop_turn`). `container/agent-runner/src/mcp-tools/interactive.ts`
+    caps web questions at 120 s and always writes an expiry record on a web timeout. Schema is the
+    module migration `module:twyn-web:question-cards`. On rebase, keep each as its one commented seam.
+12. Web stop and edit-and-resend (TwynOracle #94). `src/delivery.ts` calls the fork-owned fence
+    (`src/channels/web-turn-controls.ts`) once in `drainSession`; `history.ts` applies the same fence
+    and the Replaced marker through one hook. `container/agent-runner/src/poll-loop.ts` consumes the
+    `twyn_stop_turn` command in the outer loop and the follow-up poller, writes the fork-owned
+    `.twyn-active-turn` sidecar when a batch is claimed and when a follow-up is pushed, clears it at
+    each `result` (the query stays open after it) and at query exit, and compares echo text rather
+    than raw content (outbound content can carry `twynTurnInputId`). `providers/claude.ts` `abort()`
+    also calls the SDK `interrupt()`. `mcp-tools/core.ts` adds `twynTurnInputId` to the
+    `edit_message` and `add_reaction` content so they are fenced like `send_message` (not
+    `in_reply_to`, which agent-to-agent delivery reads as a return path). `mcp-tools/interactive.ts` ends a pending
+    question wait on stop. Schema is the module migration `module:twyn-web:turn-controls`. The shared
+    mailbox model (`src/mailbox/*`, `model.generated.ts`) is deliberately untouched. On rebase, keep
+    each seam as one commented call or line.

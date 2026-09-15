@@ -27,6 +27,14 @@ const cards = vi.hoisted(() => ({
   ),
   recordWebCard: vi.fn(async () => undefined),
 }));
+const turnControls = vi.hoisted(() => ({
+  canReplaceLatestWebMessage: vi.fn(async () => true),
+  hasActiveWebTurn: vi.fn(async () => true),
+  isLatestWebMessage: vi.fn(() => true),
+  releaseWebMessageReplacement: vi.fn(async () => undefined),
+  requestWebTurnStop: vi.fn(async () => ({ stopped: false })),
+  reserveWebMessageReplacement: vi.fn(async () => true),
+}));
 const WEB_FILES_TEST_DATA_DIR = vi.hoisted(() => '/tmp/nanoclaw-web-files-test');
 
 // A fixed test port keeps the actual browser-facing HTTP path under test while
@@ -56,6 +64,7 @@ vi.mock('../modules/cross-session-context/index.js', () => ({
 }));
 
 vi.mock('./web-cards.js', () => cards);
+vi.mock('./web-turn-controls.js', () => turnControls);
 
 import { createWebAdapter } from './web.js';
 
@@ -80,6 +89,10 @@ function eventFromInbound(platformId: string, threadId: string | null, message: 
 
 function messageUrl(): string {
   return 'http://127.0.0.1:18091/web/message';
+}
+
+function stopUrl(): string {
+  return 'http://127.0.0.1:18091/web/stop';
 }
 
 function streamUrl(): string {
@@ -198,6 +211,19 @@ beforeEach(async () => {
   cards.expireWebQuestions.mockReset();
   cards.expireWebQuestions.mockResolvedValue([]);
   cards.recordWebCard.mockClear();
+  turnControls.canReplaceLatestWebMessage.mockReset();
+  turnControls.canReplaceLatestWebMessage.mockResolvedValue(true);
+  turnControls.hasActiveWebTurn.mockReset();
+  turnControls.isLatestWebMessage.mockReset();
+  turnControls.isLatestWebMessage.mockReturnValue(true);
+  // A session with no runner activity is the normal stream fixture. Tests
+  // that exercise the running signal opt in below.
+  turnControls.hasActiveWebTurn.mockResolvedValue(false);
+  turnControls.releaseWebMessageReplacement.mockClear();
+  turnControls.requestWebTurnStop.mockReset();
+  turnControls.requestWebTurnStop.mockResolvedValue({ stopped: false });
+  turnControls.reserveWebMessageReplacement.mockReset();
+  turnControls.reserveWebMessageReplacement.mockResolvedValue(true);
   transcript.getMessagingGroupByPlatform.mockResolvedValue({ id: 'web-messaging-group' });
   transcript.getMessagingGroupAgents.mockResolvedValue([{ agent_group_id: 'agent-group' }]);
   transcript.findSessionByAgentGroup.mockResolvedValue({ id: 'shared-session', agent_group_id: 'agent-group' });
@@ -238,6 +264,108 @@ afterAll(() => {
 });
 
 describe('web channel', () => {
+  it('stops only the authenticated member session and treats no running turn as success', async () => {
+    turnControls.requestWebTurnStop.mockResolvedValueOnce({ stopped: false });
+    const response = await nativeFetch(stopUrl(), {
+      method: 'POST',
+      headers: { Authorization: 'Bearer own-member-token' },
+    });
+
+    expect(response.status).toBe(202);
+    await expect(response.json()).resolves.toEqual({ stopped: false });
+    expect(turnControls.requestWebTurnStop).toHaveBeenCalledWith(
+      { id: 'shared-session', agent_group_id: 'agent-group' },
+      {},
+    );
+  });
+
+  it('resolves a separate authenticated member before issuing a stop', async () => {
+    fetchMock.mockImplementation(async (_url: string, init?: RequestInit) => {
+      const authorization = new Headers(init?.headers).get('authorization');
+      return new Response(
+        JSON.stringify({ record: { id: authorization === 'Bearer member-two-token' ? 'member-two' : 'user-123' } }),
+        { status: 200 },
+      );
+    });
+    transcript.getMessagingGroupByPlatform.mockImplementation(async (_channelType: string, platformId: string) => ({
+      id: `${platformId}-group`,
+    }));
+    transcript.getMessagingGroupAgents.mockImplementation(async (groupId: string) => [{ agent_group_id: groupId }]);
+    transcript.findSessionByAgentGroup.mockImplementation(async (agentGroupId: string) => ({
+      id: `${agentGroupId}-session`,
+      agent_group_id: agentGroupId,
+    }));
+
+    const response = await nativeFetch(stopUrl(), {
+      method: 'POST',
+      headers: { Authorization: 'Bearer member-two-token' },
+    });
+
+    expect(response.status).toBe(202);
+    expect(turnControls.requestWebTurnStop).toHaveBeenCalledWith(
+      { id: 'web:member-two-group-session', agent_group_id: 'web:member-two-group' },
+      {},
+    );
+    expect(turnControls.requestWebTurnStop).not.toHaveBeenCalledWith(
+      { id: 'shared-session', agent_group_id: 'agent-group' },
+      expect.anything(),
+    );
+  });
+
+  it('edits and resends only the authenticated member latest web message', async () => {
+    const response = await nativeFetch(messageUrl(), {
+      method: 'POST',
+      headers: { Authorization: 'Bearer edit-token', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: 'corrected wording', replaceMessageId: 'web-message-1' }),
+    });
+
+    expect(response.status).toBe(202);
+    expect(turnControls.canReplaceLatestWebMessage).toHaveBeenCalledWith(
+      { id: 'shared-session', agent_group_id: 'agent-group' },
+      'web:user-123',
+      'web-message-1',
+    );
+    expect(turnControls.requestWebTurnStop).toHaveBeenCalledWith(
+      { id: 'shared-session', agent_group_id: 'agent-group' },
+      {},
+    );
+    expect(turnControls.reserveWebMessageReplacement).toHaveBeenCalledWith(
+      { id: 'shared-session', agent_group_id: 'agent-group' },
+      'web-message-1',
+      expect.stringMatching(/^web-\d+-.*:agent-group$/),
+    );
+    expect(inbound).toHaveLength(1);
+    expect(inbound[0]?.platformId).toBe('web:user-123');
+  });
+
+  it('releases the reservation when a newer message lands between the check and the reserve', async () => {
+    turnControls.isLatestWebMessage.mockReturnValueOnce(false);
+    const response = await nativeFetch(messageUrl(), {
+      method: 'POST',
+      headers: { Authorization: 'Bearer edit-race-token', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: 'too late', replaceMessageId: 'web-message-1' }),
+    });
+
+    expect(response.status).toBe(409);
+    expect(turnControls.releaseWebMessageReplacement).toHaveBeenCalledWith(
+      'web-message-1',
+      expect.stringMatching(/^web-\d+-.*:agent-group$/),
+    );
+    expect(inbound).toEqual([]);
+  });
+
+  it('rejects an edit when the member does not own the latest web message', async () => {
+    turnControls.canReplaceLatestWebMessage.mockResolvedValueOnce(false);
+    const response = await nativeFetch(messageUrl(), {
+      method: 'POST',
+      headers: { Authorization: 'Bearer other-member-edit-token', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: 'not mine', replaceMessageId: 'member-one-message' }),
+    });
+
+    expect(response.status).toBe(409);
+    expect(inbound).toEqual([]);
+  });
+
   it('routes one validated card answer through onAction', async () => {
     const response = await nativeFetch(questionResponseUrl(), {
       method: 'POST',
@@ -496,20 +624,28 @@ describe('web channel', () => {
   });
 
   it('turns typing refreshes into named working events on the member stream', async () => {
+    turnControls.hasActiveWebTurn.mockResolvedValue(true);
     const stream = await openStream();
     await waitForInitialTranscriptRead();
     await adapter.setTyping?.('web:user-123', null);
     const first = await stream.nextEvent();
-    await adapter.setTyping?.('web:user-123', null, 'Reading the vault');
+    const statusPath = path.join(WEB_FILES_TEST_DATA_DIR, 'v2-sessions', 'agent-group', 'shared-session', '.status');
+    fs.mkdirSync(path.dirname(statusPath), { recursive: true });
+    fs.writeFileSync(statusPath, 'Reading the vault\n');
+    await adapter.setTyping?.('web:user-123', null);
     const second = await stream.nextEvent();
     await stream.close();
 
     expect(first.event).toBe('working');
-    expect(first.data).toEqual({ at: expect.any(String), status: null });
-    expect(second).toEqual({ event: 'working', data: { at: expect.any(String), status: 'Reading the vault' } });
+    expect(first.data).toEqual({ at: expect.any(String), status: null, running: true });
+    expect(second).toEqual({
+      event: 'working',
+      data: { at: expect.any(String), status: 'Reading the vault', running: true },
+    });
   });
 
   it('fills a status-less typing refresh from the runner status file', async () => {
+    turnControls.hasActiveWebTurn.mockResolvedValue(true);
     const statusPath = path.join(WEB_FILES_TEST_DATA_DIR, 'v2-sessions', 'agent-group', 'shared-session', '.status');
     fs.mkdirSync(path.dirname(statusPath), { recursive: true });
     fs.writeFileSync(statusPath, 'Reading sources\n');
@@ -520,22 +656,40 @@ describe('web channel', () => {
     const event = await stream.nextEvent();
     await stream.close();
 
-    expect(event).toEqual({ event: 'working', data: { at: expect.any(String), status: 'Reading sources' } });
+    expect(event).toEqual({
+      event: 'working',
+      data: { at: expect.any(String), status: 'Reading sources', running: true },
+    });
   });
 
   it('emits working events on its own while a container runs for the session', async () => {
-    transcript.isContainerRunning.mockReturnValue(true);
+    turnControls.hasActiveWebTurn.mockResolvedValue(true);
     const stream = await openStream();
     await waitForInitialTranscriptRead();
     const first = await stream.nextEvent();
     await stream.close();
 
     expect(first.event).toBe('working');
-    expect(first.data).toEqual({ at: expect.any(String), status: null });
-    expect(transcript.isContainerRunning).toHaveBeenCalledWith('shared-session');
+    expect(first.data).toEqual({ at: expect.any(String), status: null, running: true });
+    expect(turnControls.hasActiveWebTurn).toHaveBeenCalledWith({ id: 'shared-session', agent_group_id: 'agent-group' });
+  });
+
+  it('tells a tab that joins a running turn at once instead of after the coalesced refresh', async () => {
+    turnControls.hasActiveWebTurn.mockResolvedValue(true);
+    const first = await openStream('first-tab-token');
+    await expect(first.nextEvent()).resolves.toMatchObject({ event: 'working', data: { running: true } });
+
+    // The poll coalesces an unchanged running state for 3.5 s, so only the connect path can answer this fast.
+    const second = await openStream('second-tab-token');
+    const joined = await Promise.race([second.nextEvent().catch(() => null), delay(1_000).then(() => null)]);
+    await first.close();
+    await second.close();
+
+    expect(joined).toMatchObject({ event: 'working', data: { running: true } });
   });
 
   it('includes the runner status file in working events while a container runs', async () => {
+    turnControls.hasActiveWebTurn.mockResolvedValue(true);
     const statusPath = path.join(WEB_FILES_TEST_DATA_DIR, 'v2-sessions', 'agent-group', 'shared-session', '.status');
     fs.mkdirSync(path.dirname(statusPath), { recursive: true });
     fs.writeFileSync(statusPath, '  Drawing  \n');
@@ -546,19 +700,39 @@ describe('web channel', () => {
     const first = await stream.nextEvent();
     await stream.close();
 
-    expect(first).toEqual({ event: 'working', data: { at: expect.any(String), status: 'Drawing' } });
+    expect(first).toEqual({ event: 'working', data: { at: expect.any(String), status: 'Drawing', running: true } });
   });
 
   it('stays quiet when no container runs for the session', async () => {
-    transcript.isContainerRunning.mockReturnValue(false);
+    turnControls.hasActiveWebTurn.mockResolvedValue(false);
     const stream = await openStream();
     await waitForInitialTranscriptRead();
     await delay(150);
-    await adapter.setTyping?.('web:user-123', null, 'probe');
-    const next = await stream.nextEvent();
+    const next = stream.nextEvent();
+    await adapter.setTyping?.('web:user-123', null);
+    const emitted = await Promise.race([next.then(() => true).catch(() => false), delay(50).then(() => false)]);
     await stream.close();
 
-    expect(next).toEqual({ event: 'working', data: { at: expect.any(String), status: 'probe' } });
+    expect(emitted).toBe(false);
+  });
+
+  it('emits one idle transition after a live turn stops', async () => {
+    turnControls.hasActiveWebTurn.mockResolvedValue(true);
+    const stream = await openStream();
+    await waitForInitialTranscriptRead();
+    await adapter.setTyping?.('web:user-123', null);
+    await expect(stream.nextEvent()).resolves.toMatchObject({ event: 'working', data: { running: true } });
+
+    turnControls.hasActiveWebTurn.mockResolvedValue(false);
+    await adapter.setTyping?.('web:user-123', null);
+    await expect(stream.nextEvent()).resolves.toMatchObject({ event: 'working', data: { running: false } });
+
+    const next = stream.nextEvent();
+    await adapter.setTyping?.('web:user-123', null);
+    const emitted = await Promise.race([next.then(() => true).catch(() => false), delay(50).then(() => false)]);
+    await stream.close();
+
+    expect(emitted).toBe(false);
   });
 
   it('ignores typing refreshes for a member with no open stream', async () => {
@@ -946,6 +1120,9 @@ describe('web channel', () => {
   });
 
   it('does not render the same outbound row twice when deliver() and polling both see it', async () => {
+    // `next()` observes every SSE frame, including named working events.
+    // This is an isolated delivery regression check for a genuinely idle session.
+    turnControls.hasActiveWebTurn.mockResolvedValue(false);
     const stream = await openStream();
     await waitForInitialTranscriptRead();
     historyRows = [row('only once', '2026-09-04T10:00:04.000Z')];
@@ -961,6 +1138,26 @@ describe('web channel', () => {
       delay(80).then(() => true),
     ]);
     expect(noSecondEvent).toBe(true);
+    await stream.close();
+  });
+
+  it('does not publish a working event after delivery to an idle session', async () => {
+    turnControls.hasActiveWebTurn.mockResolvedValue(false);
+    const stream = await openStream();
+    await waitForInitialTranscriptRead();
+    historyRows = [row('idle reply', '2026-09-04T10:00:04.500Z')];
+
+    await adapter.deliver('web:user-123', null, { kind: 'chat', content: { text: 'idle reply' } });
+    await expect(stream.next()).resolves.toMatchObject({ text: 'idle reply' });
+
+    const noWorkingEvent = await Promise.race([
+      stream
+        .nextEvent()
+        .then(() => false)
+        .catch(() => true),
+      delay(80).then(() => true),
+    ]);
+    expect(noWorkingEvent).toBe(true);
     await stream.close();
   });
 

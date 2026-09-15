@@ -1,8 +1,11 @@
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 
 import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from './mailbox/sqlite/connection.js';
 import { getUndeliveredMessages } from './db/messages-out.js';
-import { processQuery } from './poll-loop.js';
+import { completeStopCommand, processQuery } from './poll-loop.js';
 import { MockProvider } from './providers/mock.js';
 import type { AgentQuery, ProviderEvent } from './providers/types.js';
 
@@ -59,9 +62,9 @@ function insertMessage(id: string, kind: string, content: object): void {
 
 function taskLogRows(): Array<{ text: string }> {
   return (
-    getOutboundDb()
-      .prepare("SELECT content FROM messages_out WHERE kind = 'task_log' ORDER BY seq")
-      .all() as Array<{ content: string }>
+    getOutboundDb().prepare("SELECT content FROM messages_out WHERE kind = 'task_log' ORDER BY seq").all() as Array<{
+      content: string;
+    }>
   ).map((r) => JSON.parse(r.content) as { text: string });
 }
 
@@ -81,6 +84,35 @@ function makeStubQuery(events: AsyncGenerator<ProviderEvent>): { query: AgentQue
 }
 
 describe('mid-turn <message> block delivery', () => {
+  it.each([
+    ['web', 'web:member-1', null],
+    ['slack', 'slack:C1', 'slack-thread-1'],
+  ])('writes its Stopped notice to the original %s reply surface', async (channelType, platformId, threadId) => {
+    insertMessage('stop-command', 'system', {
+      type: 'twyn_stop_turn',
+      noticeId: `stopped-${channelType}`,
+      channelType,
+      platformId,
+      threadId,
+    });
+    const command = getInboundDb()
+      .prepare('SELECT * FROM messages_in WHERE id = ?')
+      .get('stop-command') as import('./db/messages-in.js').MessageInRow;
+
+    await completeStopCommand(command);
+
+    expect(getUndeliveredMessages()).toEqual([
+      expect.objectContaining({
+        id: `stopped-${channelType}`,
+        in_reply_to: null,
+        platform_id: platformId,
+        channel_type: channelType,
+        thread_id: threadId,
+        content: JSON.stringify({ type: 'twyn_turn_stopped', text: 'Stopped' }),
+      }),
+    ]);
+  });
+
   it('delivers a complete block from a mid-turn text event immediately', async () => {
     seedDest();
     let outCountBeforeResult = -1;
@@ -209,6 +241,106 @@ describe('mid-turn <message> block delivery', () => {
     expect(JSON.parse(out[0].content).text).toBe('The answer is 4.');
     expect(JSON.parse(out[1].content).text).toBe('Re: follow-up.');
     expect(pushes.filter((p) => p.includes('was not delivered'))).toHaveLength(0);
+  });
+
+  it('ends the active turn at each result and restarts it for a follow-up in the open query', async () => {
+    seedDest();
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoclaw-active-turn-'));
+    const originalHeartbeatPath = process.env.NANOCLAW_HEARTBEAT_PATH;
+    process.env.NANOCLAW_HEARTBEAT_PATH = path.join(directory, '.heartbeat');
+    const activePath = path.join(directory, '.twyn-active-turn');
+    const seen: Record<string, boolean> = {};
+    const pushes: string[] = [];
+
+    async function* events(): AsyncGenerator<ProviderEvent> {
+      yield { type: 'init', continuation: 's1' };
+      seen.duringFirst = fs.existsSync(activePath);
+      yield { type: 'text', text: '<message to="discord-main">First.</message>' };
+      yield { type: 'result', text: '<message to="discord-main">First.</message>' };
+      seen.idleAfterFirst = fs.existsSync(activePath);
+
+      insertMessage('m2', 'chat', { sender: 'User', text: 'follow-up after idle' });
+      const deadline = Date.now() + 5000;
+      while (!pushes.some((p) => p.includes('follow-up after idle')) && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      seen.duringFollowUp = fs.existsSync(activePath);
+      yield { type: 'text', text: '<message to="discord-main">Second.</message>' };
+      yield { type: 'result', text: '<message to="discord-main">Second.</message>' };
+      seen.idleAfterFollowUp = fs.existsSync(activePath);
+    }
+    const query: AgentQuery = {
+      push: (m: string) => {
+        pushes.push(m);
+      },
+      end: () => {},
+      events: events(),
+      abort: () => {},
+    };
+
+    try {
+      fs.writeFileSync(activePath, JSON.stringify({ inputId: 'm1' }));
+      await processQuery(query, CHAT_ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined, true);
+    } finally {
+      if (originalHeartbeatPath === undefined) delete process.env.NANOCLAW_HEARTBEAT_PATH;
+      else process.env.NANOCLAW_HEARTBEAT_PATH = originalHeartbeatPath;
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+
+    expect(seen).toEqual({
+      duringFirst: true,
+      idleAfterFirst: false,
+      duringFollowUp: true,
+      idleAfterFollowUp: false,
+    });
+    expect(pushes.filter((p) => p.includes('was not delivered'))).toHaveLength(0);
+  });
+
+  it('keeps the active turn for a follow-up pushed before the running turn result', async () => {
+    seedDest();
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoclaw-active-turn-'));
+    const originalHeartbeatPath = process.env.NANOCLAW_HEARTBEAT_PATH;
+    process.env.NANOCLAW_HEARTBEAT_PATH = path.join(directory, '.heartbeat');
+    const activePath = path.join(directory, '.twyn-active-turn');
+    const seen: Record<string, boolean> = {};
+    const pushes: string[] = [];
+
+    async function* events(): AsyncGenerator<ProviderEvent> {
+      yield { type: 'init', continuation: 's1' };
+      insertMessage('m2', 'chat', { sender: 'User', text: 'follow-up while busy' });
+      const deadline = Date.now() + 5000;
+      while (!pushes.some((p) => p.includes('follow-up while busy')) && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      yield { type: 'activity' };
+      yield { type: 'text', text: '<message to="discord-main">First.</message>' };
+      yield { type: 'result', text: '<message to="discord-main">First.</message>' };
+      // The follow-up's own turn starts streaming.
+      yield { type: 'activity' };
+      seen.duringFollowUpTurn = fs.existsSync(activePath);
+      yield { type: 'text', text: '<message to="discord-main">Second.</message>' };
+      yield { type: 'result', text: '<message to="discord-main">Second.</message>' };
+      seen.idleAfterFollowUp = fs.existsSync(activePath);
+    }
+    const query: AgentQuery = {
+      push: (m: string) => {
+        pushes.push(m);
+      },
+      end: () => {},
+      events: events(),
+      abort: () => {},
+    };
+
+    try {
+      fs.writeFileSync(activePath, JSON.stringify({ inputId: 'm1' }));
+      await processQuery(query, CHAT_ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined, true);
+    } finally {
+      if (originalHeartbeatPath === undefined) delete process.env.NANOCLAW_HEARTBEAT_PATH;
+      else process.env.NANOCLAW_HEARTBEAT_PATH = originalHeartbeatPath;
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+
+    expect(seen).toEqual({ duringFollowUpTurn: true, idleAfterFollowUp: false });
   });
 
   it('a later turn re-emitting the same block body delivers again (nothing content-keyed persists)', async () => {

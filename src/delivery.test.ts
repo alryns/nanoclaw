@@ -26,7 +26,7 @@ vi.mock('./config.js', async () => {
 
 const TEST_DIR = '/tmp/nanoclaw-test-delivery';
 
-import { initTestDb, closeDb, runMigrations, createAgentGroup, createMessagingGroup } from './db/index.js';
+import { getDb, initTestDb, closeDb, runMigrations, createAgentGroup, createMessagingGroup } from './db/index.js';
 import { getDeliveredIds } from './mailbox/sqlite/session-db.js';
 import { inboundDbPath, outboundDbPath } from './mailbox/sqlite/paths.js';
 import { resolveSession, resolveTaskSession, withMailboxSession } from './session-manager.js';
@@ -90,6 +90,59 @@ afterEach(async () => {
 });
 
 describe('deliverSessionMessages — concurrent invocations', () => {
+  it('drops post-stop output for the stopped turn while delivering the next turn', async () => {
+    await seedAgentAndChannel();
+    const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
+    const outbox = new Database(outboundDbPath('ag-1', session.id));
+    outbox
+      .prepare(
+        `INSERT INTO messages_out
+           (id, timestamp, kind, platform_id, channel_type, content, in_reply_to)
+         VALUES (?, ?, 'chat', 'telegram:123', 'telegram', ?, ?)`,
+      )
+      .run(
+        'late-stopped',
+        '2026-08-01T10:03:00.000Z',
+        JSON.stringify({ text: 'late stopped output', twynTurnInputId: 'stopped-turn' }),
+        'older-destination-input',
+      );
+    outbox
+      .prepare(
+        `INSERT INTO messages_out
+           (id, timestamp, kind, platform_id, channel_type, content, in_reply_to)
+         VALUES (?, ?, 'chat', 'telegram:123', 'telegram', ?, ?)`,
+      )
+      .run(
+        'next-turn',
+        '2026-08-01T10:04:00.000Z',
+        JSON.stringify({ text: 'next turn output', twynTurnInputId: 'next-turn' }),
+        'older-destination-input',
+      );
+    outbox.close();
+    await getDb().run(
+      'INSERT INTO web_stopped_turns (session_id, in_reply_to, stopped_at, outbound_sequence) VALUES (?, ?, ?, ?)',
+      session.id,
+      'stopped-turn',
+      '2026-08-01T10:02:00.000Z',
+      0,
+    );
+
+    const calls: string[] = [];
+    setDeliveryAdapter({
+      async deliver(_channelType, _platformId, _threadId, _kind, content) {
+        calls.push(content);
+        return 'delivered';
+      },
+    });
+
+    await deliverSessionMessages(session);
+
+    expect(calls).toEqual([JSON.stringify({ text: 'next turn output', twynTurnInputId: 'next-turn' })]);
+    const delivered = await withMailboxSession('ag-1', session.id, (mailbox) => mailbox.getDeliveredIds());
+    expect(delivered.has('late-stopped')).toBe(true);
+    expect(delivered.has('next-turn')).toBe(true);
+  });
+
   it('logs mailbox failures with session context and retries on the next poll', async () => {
     await seedAgentAndChannel();
     const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');

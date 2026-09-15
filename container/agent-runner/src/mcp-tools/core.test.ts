@@ -15,7 +15,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 
 import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from '../mailbox/sqlite/connection.js';
 import { getUndeliveredMessages } from '../db/messages-out.js';
-import { sendMessage } from './core.js';
+import { addReaction, editMessage, sendMessage } from './core.js';
 
 /**
  * Publish the a2a reply stamp the way the poll loop does: a direct write to
@@ -71,6 +71,40 @@ describe('send_message MCP tool — in_reply_to plumbing', () => {
 
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(1);
+    expect(out[0].in_reply_to).toBeNull();
+  });
+});
+
+// TwynOracle fork: a web stop fences output by turn; edits and reactions must carry the turn too.
+describe('edit_message and add_reaction MCP tools — turn marker', () => {
+  beforeEach(() => {
+    getInboundDb()
+      .prepare(
+        `INSERT INTO messages_in (id, seq, kind, timestamp, status, trigger, platform_id, channel_type, thread_id, content)
+         VALUES ('member-msg', 2, 'chat', ?, 'completed', 1, 'web:member', 'web', NULL, '{"text":"hi"}')`,
+      )
+      .run(new Date().toISOString());
+  });
+
+  it('marks an edit with the batch turn', async () => {
+    publishInReplyTo('inbound-msg-1');
+
+    await editMessage.handler({ messageId: 2, text: 'edited' });
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(JSON.parse(out[0].content).twynTurnInputId).toBe('inbound-msg-1');
+    expect(out[0].in_reply_to).toBeNull();
+  });
+
+  it('marks a reaction with the batch turn', async () => {
+    publishInReplyTo('inbound-msg-1');
+
+    await addReaction.handler({ messageId: 2, emoji: 'heart' });
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(JSON.parse(out[0].content).twynTurnInputId).toBe('inbound-msg-1');
     expect(out[0].in_reply_to).toBeNull();
   });
 });

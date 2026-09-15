@@ -210,3 +210,29 @@ test('writes an expiry record for every timed out web question', async () => {
   expect(messages).toHaveLength(2);
   expect(messages[1]).toEqual({ type: 'ask_question_expired', questionId: messages[0].questionId });
 });
+
+test('ends a pending question wait when the host stop command arrives', async () => {
+  seedWebRouting();
+  getInboundDb()
+    .prepare(
+      `INSERT INTO messages_in (id, kind, timestamp, status, content)
+       VALUES (?, 'system', ?, 'pending', ?)`,
+    )
+    .run(
+      'stop-command',
+      new Date().toISOString(),
+      JSON.stringify({ type: 'twyn_stop_turn', noticeId: 'stopped-notice' }),
+    );
+
+  const result = await askUserQuestion.handler({
+    title: 'Choose',
+    question: 'Which option?',
+    options: ['One'],
+  });
+
+  expect(result).toEqual({
+    content: [{ type: 'text', text: 'Error: Question stopped' }],
+    isError: true,
+  });
+  expect(getUndeliveredMessages()).toHaveLength(1);
+});

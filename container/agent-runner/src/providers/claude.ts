@@ -695,6 +695,10 @@ export class ClaudeProvider implements AgentProvider {
       events: translateEvents(),
       abort: () => {
         aborted = true;
+        // TwynOracle fork: ending the prompt stream alone only stops us
+        // consuming events. Query.interrupt() cancels an in-flight tool call
+        // and SDK-managed sub-agent work as well.
+        void sdkResult.interrupt().catch((err: unknown) => log(`SDK interrupt failed: ${String(err)}`));
         stream.end();
       },
     };

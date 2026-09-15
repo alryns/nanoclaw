@@ -24,6 +24,7 @@ import { isUnguarded, type Unguarded } from './guard/index.js';
 import { fanOutboundMessage } from './modules/cross-session-context/index.js';
 import { log } from './log.js';
 import { normalizeOptions } from './channels/ask-question.js';
+import { isStoppedTurnOutput } from './channels/web-turn-controls.js';
 import { clearOutbox, readOutboxFiles, withExistingMailboxSession } from './session-manager.js';
 import { pauseTypingRefreshAfterDelivery, setTypingAdapter } from './modules/typing/index.js';
 import type { OutboundFile } from './channels/adapter.js';
@@ -255,6 +256,12 @@ async function drainSession(session: Session): Promise<void> {
 
   for (const msg of pending) {
     try {
+      // TwynOracle fork: a private outbox lookup fences only the stopped turn.
+      if (await isStoppedTurnOutput(session, msg.id, msg.inReplyTo, msg.content)) {
+        await withExistingMailboxSession(agentGroup.id, session.id, (mailbox) => mailbox.markDelivered(msg.id, null));
+        clearOutbox(session.agent_group_id, session.id, msg.id);
+        continue;
+      }
       const platformMsgId = await deliverMessage(msg, session);
       await withExistingMailboxSession(agentGroup.id, session.id, (mailbox) =>
         mailbox.markDelivered(msg.id, platformMsgId ?? null),

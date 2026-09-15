@@ -190,7 +190,14 @@ export const editMessage: McpToolDefinition = {
       platform_id: routing.platform_id,
       channel_type: routing.channel_type,
       thread_id: routing.thread_id,
-      content: JSON.stringify({ operation: 'edit', messageId: platformId, text }),
+      // TwynOracle fork: carry the turn in the display-inert marker so a web stop fences it. Not
+      // in_reply_to, which agent-to-agent delivery reads as a return path.
+      content: JSON.stringify({
+        operation: 'edit',
+        messageId: platformId,
+        text,
+        twynTurnInputId: getCurrentInReplyTo(),
+      }),
     });
 
     log(`edit_message: #${seq} → ${platformId}`);
@@ -231,7 +238,13 @@ export const addReaction: McpToolDefinition = {
       platform_id: routing.platform_id,
       channel_type: routing.channel_type,
       thread_id: routing.thread_id,
-      content: JSON.stringify({ operation: 'reaction', messageId: platformId, emoji }),
+      // TwynOracle fork: same turn marker as edit_message.
+      content: JSON.stringify({
+        operation: 'reaction',
+        messageId: platformId,
+        emoji,
+        twynTurnInputId: getCurrentInReplyTo(),
+      }),
     });
 
     log(`add_reaction: #${seq} → ${emoji} on ${platformId}`);

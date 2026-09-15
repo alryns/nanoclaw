@@ -74,6 +74,24 @@ afterEach(async () => {
 });
 
 describe('sessionHistory', () => {
+  // TwynOracle fork: a card click is stored as a system row; it must not render as an empty message.
+  it('omits routed question responses from the transcript', async () => {
+    await writeInbound('in-1', '2026-08-02T10:00:00.000Z', 'hello');
+    await writeSessionMessage(AG, SESS, {
+      id: 'qr-1',
+      kind: 'system',
+      timestamp: '2026-08-02T10:01:00.000Z',
+      platformId: 'web:u1',
+      channelType: 'web',
+      threadId: null,
+      content: JSON.stringify({ type: 'question_response', questionId: 'q-1', selectedOption: 'Blue', userId: '' }),
+    });
+
+    const rows = await sessionHistory({ id: SESS }, HOST);
+
+    expect(rows.map((row) => row.text)).toEqual(['hello']);
+  });
+
   it('merges inbound + outbound chronologically as structured rows (ISO timestamps)', async () => {
     await writeInbound('in-1', '2026-08-01T10:00:00.000Z', 'hello there');
     await writeInbound('in-2', '2026-08-01T10:02:00.000Z', 'second message');

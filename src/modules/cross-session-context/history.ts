@@ -87,13 +87,13 @@ function parseText(raw: string): {
         : parsed.type === 'card' && parsed.card && typeof parsed.card === 'object'
           ? { type: 'display', ...(parsed.card as Record<string, unknown>) }
           : undefined;
-    // TwynOracle fork: expiry records update a card; they are never transcript replies.
     return {
       text,
       sender: typeof parsed.sender === 'string' ? parsed.sender : null,
       files,
       card,
-      hidden: parsed.type === 'ask_question_expired',
+      // TwynOracle fork: bookkeeping rows, not messages (runner expiry, a card click's routed answer).
+      hidden: parsed.type === 'ask_question_expired' || parsed.type === 'question_response',
     };
   } catch {
     return { text: raw, sender: null };
@@ -133,7 +133,8 @@ export async function sessionHistory(args: Record<string, unknown>, ctx: CallerC
 
   if (history) {
     for (const r of history.inbound) {
-      const { text, sender } = parseText(r.content);
+      const { text, sender, hidden } = parseText(r.content);
+      if (hidden) continue;
       rows.push({ timestamp: r.timestamp, direction: 'in', kind: r.kind, sender: sender ?? '', text });
     }
     for (const r of history.outbound) {

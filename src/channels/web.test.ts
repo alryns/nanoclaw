@@ -791,6 +791,24 @@ describe('web channel', () => {
     return root;
   }
 
+  function vaultFixtureWithProdReleasePages(): string {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoclaw-web-vault-'));
+    const vaultsRoot = path.join(root, 'current', 'vaults');
+    const docsRoot = path.join(vaultsRoot, 'docs', 'nested');
+    const repoGraphRoot = path.join(vaultsRoot, 'repo-graph');
+    const releasesRoot = path.join(repoGraphRoot, 'prod-releases');
+    fs.mkdirSync(docsRoot, { recursive: true });
+    fs.mkdirSync(path.join(repoGraphRoot, 'graph'), { recursive: true });
+    fs.mkdirSync(releasesRoot, { recursive: true });
+    fs.writeFileSync(path.join(docsRoot, 'guide.md'), '# Guide\n');
+    fs.writeFileSync(path.join(releasesRoot, 'x.md'), '# Release\n');
+    fs.writeFileSync(path.join(repoGraphRoot, 'OPS.md'), '# Operations\n');
+    fs.writeFileSync(path.join(repoGraphRoot, 'graph', 'x.md'), '# Graph\n');
+    fs.symlinkSync(path.join(repoGraphRoot, 'OPS.md'), path.join(releasesRoot, 'outside.md'));
+    vi.stubEnv('TWYN_BUNDLE_ROOT', root);
+    return root;
+  }
+
   it('resolves a bare slug to the unique page under the docs root', async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoclaw-web-vault-'));
     const docsRoot = path.join(root, 'current', 'vaults', 'docs', 'wiki', 'sources');
@@ -834,12 +852,53 @@ describe('web channel', () => {
     fs.rmSync(root, { recursive: true, force: true });
   });
 
-  it('serves a markdown vault page within the configured docs root', async () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoclaw-web-vault-'));
-    const docsRoot = path.join(root, 'current', 'vaults', 'docs', 'nested');
-    fs.mkdirSync(docsRoot, { recursive: true });
-    fs.writeFileSync(path.join(docsRoot, 'guide.md'), '# Guide\n');
-    vi.stubEnv('TWYN_BUNDLE_ROOT', root);
+  it('serves a published repo-graph release page', async () => {
+    const root = vaultFixtureWithProdReleasePages();
+
+    const response = await nativeFetch(vaultUrl('?path=repo-graph/prod-releases/x.md'), {
+      headers: { Authorization: 'Bearer vault-release-token' },
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.text()).resolves.toBe('# Release\n');
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it('does not serve other repo-graph files', async () => {
+    const root = vaultFixtureWithProdReleasePages();
+
+    const response = await nativeFetch(vaultUrl('?path=repo-graph/OPS.md'), {
+      headers: { Authorization: 'Bearer vault-release-token' },
+    });
+
+    expect(response.status).toBe(404);
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it('does not serve repo-graph graph files', async () => {
+    const root = vaultFixtureWithProdReleasePages();
+
+    const response = await nativeFetch(vaultUrl('?path=repo-graph/graph/x.md'), {
+      headers: { Authorization: 'Bearer vault-release-token' },
+    });
+
+    expect(response.status).toBe(404);
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it('returns 404 for a repo-graph release symlink leaving the releases root', async () => {
+    const root = vaultFixtureWithProdReleasePages();
+
+    const response = await nativeFetch(vaultUrl('?path=repo-graph/prod-releases/outside.md'), {
+      headers: { Authorization: 'Bearer vault-release-token' },
+    });
+
+    expect(response.status).toBe(404);
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it('still serves a markdown vault page within the configured docs root', async () => {
+    const root = vaultFixtureWithProdReleasePages();
 
     const response = await nativeFetch(vaultUrl('?path=nested/guide.md'), {
       headers: { Authorization: 'Bearer vault-page-token' },

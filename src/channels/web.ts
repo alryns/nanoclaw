@@ -745,14 +745,10 @@ export function createWebAdapter(options: WebAdapterOptions = {}): ChannelAdapte
         res.writeHead(405).end();
         return;
       }
-      const vaultRoot = path.join(
-        process.env.TWYN_BUNDLE_ROOT ?? '/srv/twyn-oracle/bundle',
-        'current',
-        'vaults',
-        'docs',
-      );
+      const vaultsRoot = path.join(process.env.TWYN_BUNDLE_ROOT ?? '/srv/twyn-oracle/bundle', 'current', 'vaults');
+      const docsRoot = path.join(vaultsRoot, 'docs');
       const slug = url.searchParams.get('slug');
-      const requestedPath = slug !== null ? (resolveVaultSlug(vaultRoot, slug) ?? null) : url.searchParams.get('path');
+      const requestedPath = slug !== null ? (resolveVaultSlug(docsRoot, slug) ?? null) : url.searchParams.get('path');
       if (slug !== null && requestedPath === null) {
         res.writeHead(404).end();
         return;
@@ -761,9 +757,14 @@ export function createWebAdapter(options: WebAdapterOptions = {}): ChannelAdapte
         sendStatus(res, 400);
         return;
       }
+      // Owner ruling 2026-10-06: only published repo-graph release pages are web-readable.
+      const releasePrefix = 'repo-graph/prod-releases/';
+      const isReleasePage = slug === null && requestedPath.startsWith(releasePrefix);
+      const vaultRoot = isReleasePage ? path.join(vaultsRoot, 'repo-graph', 'prod-releases') : docsRoot;
+      const relativePath = isReleasePage ? requestedPath.slice(releasePrefix.length) : requestedPath;
       try {
         const realRoot = fs.realpathSync(vaultRoot);
-        const realFile = fs.realpathSync(path.resolve(vaultRoot, requestedPath));
+        const realFile = fs.realpathSync(path.resolve(vaultRoot, relativePath));
         if (!isPathWithin(realRoot, realFile) || !fs.statSync(realFile).isFile()) {
           res.writeHead(404).end();
           return;

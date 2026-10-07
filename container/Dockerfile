@@ -127,7 +127,7 @@ RUN chmod 0644 /etc/claude-code/managed-settings.json
 # version the artifact was built with (bundle manifest developer_requirements.cli). Own venv,
 # so the system python3 (knob 6) stays stdlib-only. Inert on cohort containers, which never
 # see the env var. The skill addresses ~/.local/bin/graphify; /usr/local/bin is the PATH copy.
-ARG GRAPHIFY_VERSION=0.9.37
+ARG GRAPHIFY_VERSION=0.9.77
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     --mount=type=cache,target=/root/.cache/pip \

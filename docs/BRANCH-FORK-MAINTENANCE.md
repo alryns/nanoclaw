@@ -100,7 +100,7 @@ Registry branches add their own deps on top of upstream's. Skill `nc:dep` direct
    verify scripts under the platform-skills mount can run inside the agent container. On
    rebase, re-add the one apt line.
 
-7. `container/Dockerfile` installs the graphify CLI (`graphifyy==0.9.37`, PyPI) into
+7. `container/Dockerfile` installs the graphify CLI (`graphifyy==0.9.77`, PyPI) into
    `/opt/graphify` (own venv, `python3-venv` added for it) with symlinks at `/usr/local/bin/graphify`
    and `/home/node/.local/bin/graphify`, one block before the ncl wrapper. Developer mode only
    (the bundle's `twyn-repo-ask` skill, `TWYNBRAIN_DEVELOPER=1`); cohort containers carry it inert.
